@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+import logging
+
+from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.triggers.cron import CronTrigger
+
+from app.config import Settings, get_settings
+from app.feishu.client import FeishuClient
+from app.jushuitan.client import JushuitanClient
+from app.services.monthly_revenue import run_monthly_revenue_sync
+
+logger = logging.getLogger(__name__)
+
+_scheduler: BackgroundScheduler | None = None
+
+
+def _build_clients(settings: Settings) -> tuple[FeishuClient, JushuitanClient]:
+    feishu = FeishuClient(
+        settings.feishu_app_id,
+        settings.feishu_app_secret,
+        settings.feishu_app_token,
+    )
+    jst = JushuitanClient(
+        settings.jst_app_key,
+        settings.jst_app_secret,
+        settings.jst_token_file,
+    )
+    return feishu, jst
+
+
+def _monthly_job() -> None:
+    settings = get_settings()
+    feishu, jst = _build_clients(settings)
+    try:
+        run_monthly_revenue_sync(feishu=feishu, jst=jst, settings=settings)
+    except Exception:
+        logger.exception("定时月度营收任务执行失败")
+
+
+def start_scheduler() -> BackgroundScheduler:
+    global _scheduler
+    if _scheduler is not None:
+        return _scheduler
+    scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+    scheduler.add_job(
+        _monthly_job,
+        CronTrigger(day=6, hour=2, minute=0),
+        id="monthly_revenue_sync",
+        replace_existing=True,
+    )
+    scheduler.start()
+    _scheduler = scheduler
+    logger.info("已启动定时任务：每月 6 日 02:00 执行电商营收汇总")
+    return scheduler
+
+
+def shutdown_scheduler() -> None:
+    global _scheduler
+    if _scheduler is not None:
+        _scheduler.shutdown(wait=False)
+        _scheduler = None
