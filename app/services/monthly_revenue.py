@@ -39,6 +39,63 @@ def _previous_month_range(now: datetime | None = None) -> tuple[str, str, str]:
     return month_label, begin, end
 
 
+_QUERY_TIME_FMT = "%Y-%m-%d %H:%M:%S"
+# 聚水潭订单查询：modified_begin/modified_end 间隔不得超过 7 天
+# https://openweb.jushuitan.com/dev-doc?docType=4&docId=22
+_MAX_QUERY_DAYS = 7
+
+
+def _split_query_windows(begin: str, end: str, max_days: int = _MAX_QUERY_DAYS) -> list[tuple[str, str]]:
+    """将月份时间范围拆成若干段，每段不超过 max_days 天。"""
+    start = datetime.strptime(begin, _QUERY_TIME_FMT)
+    finish = datetime.strptime(end, _QUERY_TIME_FMT)
+    windows: list[tuple[str, str]] = []
+    cursor = start
+    while cursor <= finish:
+        window_end = min(
+            cursor + timedelta(days=max_days - 1, hours=23, minutes=59, seconds=59),
+            finish,
+        )
+        windows.append((cursor.strftime(_QUERY_TIME_FMT), window_end.strftime(_QUERY_TIME_FMT)))
+        cursor = window_end + timedelta(seconds=1)
+    return windows
+
+
+def _dedupe_orders(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按线上单号去重，避免分片查询边界重复。"""
+    unique: dict[str, dict[str, Any]] = {}
+    for order in orders:
+        key = field_text(order.get("so_id")) or field_text(order.get("o_id"))
+        if not key:
+            unique[str(id(order))] = order
+        else:
+            unique[key] = order
+    return list(unique.values())
+
+
+def _fetch_orders_for_month(
+    jst: JushuitanClient,
+    begin: str,
+    end: str,
+    *,
+    request_id: str,
+) -> list[dict[str, Any]]:
+    windows = _split_query_windows(begin, end)
+    all_orders: list[dict[str, Any]] = []
+    for i, (win_begin, win_end) in enumerate(windows, start=1):
+        logger.info(
+            "聚水潭订单分片查询 request_id=%s chunk=%s/%s range=%s ~ %s",
+            request_id,
+            i,
+            len(windows),
+            win_begin,
+            win_end,
+        )
+        chunk = jst.query_orders_all(modified_begin=win_begin, modified_end=win_end)
+        all_orders.extend(chunk)
+    return _dedupe_orders(all_orders)
+
+
 def _aggregate_orders(orders: list[dict[str, Any]], month_label: str) -> list[dict[str, Any]]:
     """
     按 (销售月份, 商品名称, 69码) 汇总销量与金额。
@@ -109,7 +166,7 @@ def run_monthly_revenue_sync(
     )
 
     try:
-        orders = jst.query_orders_all(modified_begin=begin, modified_end=end)
+        orders = _fetch_orders_for_month(jst, begin, end, request_id=request_id)
     except Exception as e:
         logger.exception("聚水潭订单查询失败 request_id=%s", request_id)
         result.errors.append(str(e))
