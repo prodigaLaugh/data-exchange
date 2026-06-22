@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from app.failure_log import log_failure
 from app.feishu.error_codes import format_feishu_error, is_token_refresh_error
 
 logger = logging.getLogger(__name__)
@@ -50,11 +51,15 @@ class FeishuClient:
         if data.get("code") != 0:
             code = data.get("code")
             msg = str(data.get("msg") or "")
-            raise FeishuApiError(
-                format_feishu_error(code, msg),
+            err = FeishuApiError(format_feishu_error(code, msg), code=code, raw=data)
+            log_failure(
+                "feishu",
+                str(err),
                 code=code,
-                raw=data,
+                path=TOKEN_URL,
+                context={"stage": "tenant_access_token"},
             )
+            raise err
         token = data.get("tenant_access_token")
         if not token:
             raise FeishuApiError("响应中缺少 tenant_access_token", raw=data)
@@ -98,17 +103,27 @@ class FeishuClient:
         retry_on_token_error: bool = True,
     ) -> dict[str, Any]:
         url = f"{FEISHU_BASE}{path}"
-        with httpx.Client(timeout=60.0) as client:
-            token = self._ensure_token(client)
-            resp = client.request(
-                method,
-                url,
-                headers={"Authorization": f"Bearer {token}"},
-                params=params,
-                json=json_body,
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                token = self._ensure_token(client)
+                resp = client.request(
+                    method,
+                    url,
+                    headers={"Authorization": f"Bearer {token}"},
+                    params=params,
+                    json=json_body,
+                )
+                resp.raise_for_status()
+                body = resp.json()
+        except httpx.HTTPError as e:
+            log_failure(
+                "feishu",
+                f"HTTP 请求失败: {e}",
+                path=path,
+                context={"method": method, "params": params},
+                exc=e,
             )
-            resp.raise_for_status()
-            body = resp.json()
+            raise
 
         code = body.get("code")
         msg = str(body.get("msg") or "")
@@ -130,11 +145,15 @@ class FeishuClient:
                     json_body=json_body,
                     retry_on_token_error=False,
                 )
-            raise FeishuApiError(
-                format_feishu_error(code, msg),
+            err = FeishuApiError(format_feishu_error(code, msg), code=code, raw=body)
+            log_failure(
+                "feishu",
+                str(err),
                 code=code,
-                raw=body,
+                path=path,
+                context={"method": method},
             )
+            raise err
         data = body.get("data")
         return data if isinstance(data, dict) else {}
 

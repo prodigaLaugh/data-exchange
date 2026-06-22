@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 
+from app.failure_log import log_failure
 from app.jushuitan.error_codes import (
     format_jst_error,
     is_timestamp_retry_error,
@@ -39,22 +40,30 @@ class JushuitanClient:
         params = dict(params)
         params["sign"] = jst_sign(params, self._app_secret)
         url = f"{JST_BASE}{path}"
-        with httpx.Client(timeout=60.0) as client:
-            resp = client.post(
-                url,
-                data=params,
-                headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                resp = client.post(
+                    url,
+                    data=params,
+                    headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+                )
+                resp.raise_for_status()
+                body = resp.json()
+        except httpx.HTTPError as e:
+            log_failure(
+                "jushuitan",
+                f"HTTP 请求失败: {e}",
+                path=path,
+                context={"stage": "auth"},
+                exc=e,
             )
-            resp.raise_for_status()
-            body = resp.json()
+            raise
         if body.get("code") != 0:
             code = body.get("code")
             msg = str(body.get("msg") or "")
-            raise JushuitanApiError(
-                format_jst_error(code, msg),
-                code=code,
-                raw=body,
-            )
+            err = JushuitanApiError(format_jst_error(code, msg), code=code, raw=body)
+            log_failure("jushuitan", str(err), code=code, path=path, context={"stage": "auth"})
+            raise err
         data = body.get("data")
         if not isinstance(data, dict):
             raise JushuitanApiError("鉴权响应缺少 data", raw=body)
@@ -106,14 +115,24 @@ class JushuitanClient:
         }
         params["sign"] = jst_sign(params, self._app_secret)
         url = f"{JST_BASE}{path}"
-        with httpx.Client(timeout=120.0) as client:
-            resp = client.post(
-                url,
-                data=params,
-                headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+        try:
+            with httpx.Client(timeout=120.0) as client:
+                resp = client.post(
+                    url,
+                    data=params,
+                    headers={"Content-Type": "application/x-www-form-urlencoded;charset=UTF-8"},
+                )
+                resp.raise_for_status()
+                body = resp.json()
+        except httpx.HTTPError as e:
+            log_failure(
+                "jushuitan",
+                f"HTTP 请求失败: {e}",
+                path=path,
+                context={"stage": "biz"},
+                exc=e,
             )
-            resp.raise_for_status()
-            body = resp.json()
+            raise
 
         code = body.get("code")
         msg = str(body.get("msg") or "")
@@ -145,11 +164,9 @@ class JushuitanClient:
                     retry_on_token_error=False,
                     retry_on_timestamp_error=False,
                 )
-            raise JushuitanApiError(
-                format_jst_error(code, msg),
-                code=code,
-                raw=body,
-            )
+            err = JushuitanApiError(format_jst_error(code, msg), code=code, raw=body)
+            log_failure("jushuitan", str(err), code=code, path=path, context={"stage": "biz"})
+            raise err
         data = body.get("data")
         return data if isinstance(data, dict) else {"raw": data}
 

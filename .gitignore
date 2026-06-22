@@ -7,4 +7,6 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 *.log
+!logs/.gitkeep
 data/
+logs/*.log

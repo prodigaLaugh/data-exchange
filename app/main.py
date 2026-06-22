@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
@@ -10,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.config import Settings, get_settings
 from app.debounce import Debouncer
+from app.failure_log import log_failure
 from app.feishu.client import FeishuClient
 from app.jushuitan.client import JushuitanClient
 from app.scheduler import shutdown_scheduler, start_scheduler
@@ -31,6 +33,7 @@ def setup_logging(level: str) -> None:
 async def lifespan(_app: FastAPI):
     settings = get_settings()
     setup_logging(settings.log_level)
+    Path(settings.log_dir).mkdir(parents=True, exist_ok=True)
     global _debouncer
     _debouncer = Debouncer(settings.debounce_seconds)
     start_scheduler()
@@ -125,7 +128,26 @@ def batch_push(
         )
     except Exception as e:
         logger.exception("批量推送异常 table_id=%s", table_id)
+        log_failure(
+            "api",
+            str(e),
+            path="/api/v1/batch-push",
+            context={"request_id": request_id, "table_id": table_id},
+            exc=e,
+        )
         raise HTTPException(status_code=502, detail=str(e)) from e
+
+    if result.errors:
+        log_failure(
+            "batch_push",
+            "批量推送部分步骤失败",
+            path="/api/v1/batch-push",
+            context={
+                "request_id": result.request_id,
+                "table_id": table_id,
+                "errors": result.errors,
+            },
+        )
 
     return BatchPushResponse(
         ok=True,
@@ -160,7 +182,25 @@ def manual_monthly_sync(
         )
     except Exception as e:
         logger.exception("手动月度汇总失败")
+        log_failure(
+            "api",
+            str(e),
+            path="/api/v1/monthly-revenue/sync",
+            exc=e,
+        )
         raise HTTPException(status_code=502, detail=str(e)) from e
+
+    if result.errors:
+        log_failure(
+            "monthly_revenue",
+            result.message,
+            path="/api/v1/monthly-revenue/sync",
+            context={
+                "request_id": result.request_id,
+                "target_month": result.target_month,
+                "errors": result.errors,
+            },
+        )
 
     return MonthlySyncResponse(
         ok=not result.errors,

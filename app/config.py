@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     submit_api_key: str = Field(..., alias="SUBMIT_API_KEY")
     debounce_seconds: int = Field(30, alias="DEBOUNCE_SECONDS")
     log_level: str = Field("INFO", alias="LOG_LEVEL")
+    log_dir: str = Field("logs", alias="LOG_DIR")
 
     sync_status_success: str = "推送成功"
     sync_status_failed: str = "同步失败"

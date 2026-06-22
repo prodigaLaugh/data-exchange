@@ -6,6 +6,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import Settings, get_settings
+from app.failure_log import log_failure
 from app.feishu.client import FeishuClient
 from app.jushuitan.client import JushuitanClient
 from app.services.monthly_revenue import run_monthly_revenue_sync
@@ -33,9 +34,26 @@ def _monthly_job() -> None:
     settings = get_settings()
     feishu, jst = _build_clients(settings)
     try:
-        run_monthly_revenue_sync(feishu=feishu, jst=jst, settings=settings)
-    except Exception:
+        result = run_monthly_revenue_sync(feishu=feishu, jst=jst, settings=settings)
+        if result.errors:
+            log_failure(
+                "monthly_revenue",
+                result.message,
+                path="scheduler/monthly_revenue_sync",
+                context={
+                    "request_id": result.request_id,
+                    "target_month": result.target_month,
+                    "errors": result.errors,
+                },
+            )
+    except Exception as e:
         logger.exception("定时月度营收任务执行失败")
+        log_failure(
+            "monthly_revenue",
+            str(e),
+            path="scheduler/monthly_revenue_sync",
+            exc=e,
+        )
 
 
 def start_scheduler() -> BackgroundScheduler:
