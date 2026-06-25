@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -9,10 +10,23 @@ from typing import Any
 
 from app.config import Settings
 from app.feishu.client import FeishuClient
-from app.fields import COL_BARCODE, COL_PRODUCT_NAME, COL_SALE_AMOUNT, COL_SALE_MONTH, COL_SALE_QTY, field_number, field_text
+from app.fields import (
+    COL_BARCODE,
+    COL_ECOMMERCE_PLATFORM,
+    COL_PRODUCT_NAME,
+    COL_SALE_AMOUNT,
+    COL_SALE_MONTH,
+    COL_SALE_QTY,
+    field_number,
+    field_text,
+)
 from app.jushuitan.client import JushuitanClient
 
 logger = logging.getLogger(__name__)
+
+# 串行查询间隔，降低聚水潭 code=199 限频概率
+CHUNK_DELAY_SECONDS = 2.0
+PAGE_DELAY_SECONDS = 1.0
 
 
 @dataclass
@@ -61,47 +75,31 @@ def _split_query_windows(begin: str, end: str, max_days: int = _MAX_QUERY_DAYS) 
     return windows
 
 
-def _dedupe_orders(orders: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """按线上单号去重，避免分片查询边界重复。"""
-    unique: dict[str, dict[str, Any]] = {}
+def _order_dedup_key(order: dict[str, Any]) -> str:
+    return field_text(order.get("so_id")) or field_text(order.get("o_id"))
+
+
+# 聚合维度：销售月份 + 电商平台(shop_name) + 商品
+_GroupKey = tuple[str, str, str, str]
+
+
+def _merge_orders_into_groups(
+    groups: dict[_GroupKey, dict[str, Any]],
+    orders: list[dict[str, Any]],
+    month_label: str,
+    seen_orders: set[str],
+) -> int:
+    """将本批订单商品明细累加到 groups，返回本批新增订单数。"""
+    new_orders = 0
     for order in orders:
-        key = field_text(order.get("so_id")) or field_text(order.get("o_id"))
-        if not key:
-            unique[str(id(order))] = order
-        else:
-            unique[key] = order
-    return list(unique.values())
+        dedup_key = _order_dedup_key(order)
+        if dedup_key:
+            if dedup_key in seen_orders:
+                continue
+            seen_orders.add(dedup_key)
+            new_orders += 1
 
-
-def _fetch_orders_for_month(
-    jst: JushuitanClient,
-    begin: str,
-    end: str,
-    *,
-    request_id: str,
-) -> list[dict[str, Any]]:
-    windows = _split_query_windows(begin, end)
-    all_orders: list[dict[str, Any]] = []
-    for i, (win_begin, win_end) in enumerate(windows, start=1):
-        logger.info(
-            "聚水潭订单分片查询 request_id=%s chunk=%s/%s range=%s ~ %s",
-            request_id,
-            i,
-            len(windows),
-            win_begin,
-            win_end,
-        )
-        chunk = jst.query_orders_all(modified_begin=win_begin, modified_end=win_end)
-        all_orders.extend(chunk)
-    return _dedupe_orders(all_orders)
-
-
-def _aggregate_orders(orders: list[dict[str, Any]], month_label: str) -> list[dict[str, Any]]:
-    """
-    按 (销售月份, 商品名称, 69码) 汇总销量与金额。
-    """
-    groups: dict[tuple[str, str, str], dict[str, Any]] = {}
-    for order in orders:
+        shop_name = field_text(order.get("shop_name"))
         items = order.get("items") or []
         if not isinstance(items, list):
             continue
@@ -114,10 +112,11 @@ def _aggregate_orders(orders: list[dict[str, Any]], month_label: str) -> list[di
             amount = field_number(item.get("amount"))
             if not name and not barcode:
                 continue
-            key = (month_label, name, barcode)
+            key = (month_label, shop_name, name, barcode)
             if key not in groups:
                 groups[key] = {
                     COL_SALE_MONTH: month_label,
+                    COL_ECOMMERCE_PLATFORM: shop_name,
                     COL_PRODUCT_NAME: name,
                     COL_BARCODE: barcode,
                     COL_SALE_QTY: 0.0,
@@ -126,11 +125,16 @@ def _aggregate_orders(orders: list[dict[str, Any]], month_label: str) -> list[di
             groups[key][COL_SALE_QTY] += qty
             groups[key][COL_SALE_AMOUNT] += amount
 
+    return new_orders
+
+
+def _groups_to_rows(groups: dict[_GroupKey, dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for g in groups.values():
         rows.append(
             {
                 COL_SALE_MONTH: g[COL_SALE_MONTH],
+                COL_ECOMMERCE_PLATFORM: g[COL_ECOMMERCE_PLATFORM],
                 COL_PRODUCT_NAME: g[COL_PRODUCT_NAME],
                 COL_BARCODE: g[COL_BARCODE],
                 COL_SALE_QTY: g[COL_SALE_QTY],
@@ -138,6 +142,63 @@ def _aggregate_orders(orders: list[dict[str, Any]], month_label: str) -> list[di
             }
         )
     return rows
+
+
+def _fetch_and_aggregate_month_serial(
+    jst: JushuitanClient,
+    begin: str,
+    end: str,
+    month_label: str,
+    *,
+    request_id: str,
+) -> tuple[int, dict[_GroupKey, dict[str, Any]]]:
+    """
+    按时间分片串行查询聚水潭，每返回一页/一段即累加聚合，全部完成后再写飞书。
+    """
+    windows = _split_query_windows(begin, end)
+    groups: dict[_GroupKey, dict[str, Any]] = {}
+    seen_orders: set[str] = set()
+    total_orders = 0
+
+    for chunk_idx, (win_begin, win_end) in enumerate(windows, start=1):
+        logger.info(
+            "聚水潭订单分片开始 request_id=%s chunk=%s/%s range=%s ~ %s",
+            request_id,
+            chunk_idx,
+            len(windows),
+            win_begin,
+            win_end,
+        )
+        page = 1
+        while True:
+            orders, has_next = jst.query_orders(
+                modified_begin=win_begin,
+                modified_end=win_end,
+                page_index=page,
+                page_size=50,
+            )
+            added = _merge_orders_into_groups(groups, orders, month_label, seen_orders)
+            total_orders += added
+            logger.info(
+                "聚水潭订单分页聚合 request_id=%s chunk=%s/%s page=%s "
+                "batch_orders=%s new_orders=%s product_groups=%s",
+                request_id,
+                chunk_idx,
+                len(windows),
+                page,
+                len(orders),
+                added,
+                len(groups),
+            )
+            if not has_next or not orders:
+                break
+            page += 1
+            time.sleep(PAGE_DELAY_SECONDS)
+
+        if chunk_idx < len(windows):
+            time.sleep(CHUNK_DELAY_SECONDS)
+
+    return total_orders, groups
 
 
 def run_monthly_revenue_sync(
@@ -166,15 +227,21 @@ def run_monthly_revenue_sync(
     )
 
     try:
-        orders = _fetch_orders_for_month(jst, begin, end, request_id=request_id)
+        total_orders, groups = _fetch_and_aggregate_month_serial(
+            jst,
+            begin,
+            end,
+            month_label,
+            request_id=request_id,
+        )
     except Exception as e:
         logger.exception("聚水潭订单查询失败 request_id=%s", request_id)
         result.errors.append(str(e))
         result.message = f"订单查询失败: {e}"
         return result
 
-    result.orders_fetched = len(orders)
-    rows = _aggregate_orders(orders, month_label)
+    result.orders_fetched = total_orders
+    rows = _groups_to_rows(groups)
     result.product_groups = len(rows)
 
     if rows:

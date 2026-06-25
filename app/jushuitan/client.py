@@ -9,6 +9,7 @@ import httpx
 from app.failure_log import log_failure
 from app.jushuitan.error_codes import (
     format_jst_error,
+    is_rate_limit_error,
     is_timestamp_retry_error,
     is_token_refresh_error,
 )
@@ -18,6 +19,8 @@ from app.jushuitan.token_store import TokenManager, TokenStore
 logger = logging.getLogger(__name__)
 
 JST_BASE = "https://openapi.jushuitan.com"
+_RATE_LIMIT_MAX_RETRIES = 5
+_RATE_LIMIT_BASE_DELAY_SECONDS = 2.0
 
 
 class JushuitanApiError(Exception):
@@ -104,6 +107,8 @@ class JushuitanClient:
         *,
         retry_on_token_error: bool = True,
         retry_on_timestamp_error: bool = True,
+        retry_on_rate_limit: bool = True,
+        rate_limit_attempt: int = 0,
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
             "app_key": self._app_key,
@@ -151,6 +156,8 @@ class JushuitanClient:
                     biz,
                     retry_on_token_error=False,
                     retry_on_timestamp_error=retry_on_timestamp_error,
+                    retry_on_rate_limit=retry_on_rate_limit,
+                    rate_limit_attempt=rate_limit_attempt,
                 )
             if retry_on_timestamp_error and is_timestamp_retry_error(code):
                 logger.warning(
@@ -163,6 +170,31 @@ class JushuitanClient:
                     biz,
                     retry_on_token_error=False,
                     retry_on_timestamp_error=False,
+                    retry_on_rate_limit=retry_on_rate_limit,
+                    rate_limit_attempt=rate_limit_attempt,
+                )
+            if (
+                retry_on_rate_limit
+                and is_rate_limit_error(code)
+                and rate_limit_attempt < _RATE_LIMIT_MAX_RETRIES
+            ):
+                delay = _RATE_LIMIT_BASE_DELAY_SECONDS * (2**rate_limit_attempt)
+                logger.warning(
+                    "聚水潭 API 调用过频(code=%s)，%s 秒后重试(%s/%s): %s",
+                    code,
+                    delay,
+                    rate_limit_attempt + 1,
+                    _RATE_LIMIT_MAX_RETRIES,
+                    path,
+                )
+                time.sleep(delay)
+                return self._biz_post(
+                    path,
+                    biz,
+                    retry_on_token_error=retry_on_token_error,
+                    retry_on_timestamp_error=retry_on_timestamp_error,
+                    retry_on_rate_limit=retry_on_rate_limit,
+                    rate_limit_attempt=rate_limit_attempt + 1,
                 )
             err = JushuitanApiError(format_jst_error(code, msg), code=code, raw=body)
             log_failure("jushuitan", str(err), code=code, path=path, context={"stage": "biz"})

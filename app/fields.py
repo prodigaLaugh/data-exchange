@@ -22,6 +22,7 @@ COL_PRODUCT_NAME = "商品名称"
 
 # 电商营收登记（月度汇总目标表）列名
 COL_SALE_MONTH = "销售日期"
+COL_ECOMMERCE_PLATFORM = "电商平台"
 COL_SALE_QTY = "销量"
 COL_SALE_AMOUNT = "金额"
 

@@ -15,6 +15,9 @@ JST_TOKEN_REFRESH_CODES: frozenset[int] = frozenset({100})
 # 时间戳误差过大，可用新 timestamp 重试一次
 JST_TIMESTAMP_RETRY_CODES: frozenset[int] = frozenset({180})
 
+# 调用过频，可等待后重试
+JST_RATE_LIMIT_CODES: frozenset[int] = frozenset({199, 200})
+
 # 常见错误码排查建议（摘自官方文档）
 JST_ERROR_HINTS: dict[int, str] = {
     0: "执行成功",
@@ -66,6 +69,11 @@ def is_timestamp_retry_error(code: Any) -> bool:
     """是否因时间戳问题可立即重试。"""
     c = _normalize_code(code)
     return c is not None and c in JST_TIMESTAMP_RETRY_CODES
+
+
+def is_rate_limit_error(code: Any) -> bool:
+    c = _normalize_code(code)
+    return c is not None and c in JST_RATE_LIMIT_CODES
 
 
 def format_jst_error(code: Any, msg: str) -> str:
