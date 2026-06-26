@@ -1,0 +1,29 @@
+[project]
+name = "duijie"
+version = "1.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "httpx>=0.27.0",
+    "pydantic-settings>=2.6.0",
+    "apscheduler>=3.10.4",
+]
+
+[tool.pyright]
+include = ["app", "run.py"]
+exclude = ["**/__pycache__", ".venv", "venv", "logs", "data"]
+extraPaths = ["."]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"
+
+[tool.basedpyright]
+include = ["app", "run.py"]
+exclude = ["**/__pycache__", ".venv", "venv", "logs", "data"]
+extraPaths = ["."]
+pythonVersion = "3.13"
+typeCheckingMode = "basic"
+venvPath = "."
+venv = ".venv"

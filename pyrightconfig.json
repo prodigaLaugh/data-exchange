@@ -1,0 +1,9 @@
+{
+  "include": ["app", "run.py"],
+  "exclude": ["**/__pycache__", ".venv", "venv", "logs", "data"],
+  "extraPaths": ["."],
+  "pythonVersion": "3.13",
+  "typeCheckingMode": "basic",
+  "venvPath": ".",
+  "venv": ".venv"
+}
