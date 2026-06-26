@@ -26,8 +26,9 @@ class Settings(BaseSettings):
     log_level: str = Field("INFO", alias="LOG_LEVEL")
     log_dir: str = Field("logs", alias="LOG_DIR")
 
-    sync_status_success: str = "推送成功"
-    sync_status_failed: str = "同步失败"
+    sync_status_success: str = Field("同步成功", alias="SYNC_STATUS_SUCCESS")
+    sync_status_failed: str = Field("同步失败", alias="SYNC_STATUS_FAILED")
+    sync_status_pending: str = Field("待同步", alias="SYNC_STATUS_PENDING")
 
 
 @lru_cache

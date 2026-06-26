@@ -222,6 +222,32 @@ class JushuitanClient:
             return []
         return [o for o in orders if isinstance(o, dict)]
 
+    def query_shops_map(self) -> dict[str, str]:
+        """shop_id -> shop_name，用于订单缺少 shop_name 时回填。"""
+        mapping: dict[str, str] = {}
+        page = 1
+        while True:
+            data = self._biz_post(
+                "/open/shops/query",
+                {"page_index": page, "page_size": 100},
+            )
+            shops = data.get("shops") or []
+            if not isinstance(shops, list):
+                shops = []
+            for shop in shops:
+                if not isinstance(shop, dict):
+                    continue
+                shop_id = shop.get("shop_id")
+                shop_name = shop.get("shop_name")
+                if shop_id is None or not shop_name:
+                    continue
+                mapping[str(shop_id).strip()] = str(shop_name).strip()
+            if not data.get("has_next") or not shops:
+                break
+            page += 1
+        logger.info("已加载聚水潭店铺映射 %s 条", len(mapping))
+        return mapping
+
     def query_orders(
         self,
         *,

@@ -17,6 +17,7 @@ from app.fields import (
     COL_SALE_AMOUNT,
     COL_SALE_MONTH,
     COL_SALE_QTY,
+    extract_ecommerce_platform,
     field_number,
     field_text,
 )
@@ -88,6 +89,8 @@ def _merge_orders_into_groups(
     orders: list[dict[str, Any]],
     month_label: str,
     seen_orders: set[str],
+    *,
+    shop_name_map: dict[str, str] | None = None,
 ) -> int:
     """将本批订单商品明细累加到 groups，返回本批新增订单数。"""
     new_orders = 0
@@ -99,7 +102,7 @@ def _merge_orders_into_groups(
             seen_orders.add(dedup_key)
             new_orders += 1
 
-        shop_name = field_text(order.get("shop_name"))
+        shop_name = extract_ecommerce_platform(order, shop_name_map)
         items = order.get("items") or []
         if not isinstance(items, list):
             continue
@@ -151,6 +154,7 @@ def _fetch_and_aggregate_month_serial(
     month_label: str,
     *,
     request_id: str,
+    shop_name_map: dict[str, str] | None = None,
 ) -> tuple[int, dict[_GroupKey, dict[str, Any]]]:
     """
     按时间分片串行查询聚水潭，每返回一页/一段即累加聚合，全部完成后再写飞书。
@@ -177,7 +181,26 @@ def _fetch_and_aggregate_month_serial(
                 page_index=page,
                 page_size=50,
             )
-            added = _merge_orders_into_groups(groups, orders, month_label, seen_orders)
+            if page == 1 and chunk_idx == 1 and orders:
+                sample = orders[0]
+                logger.info(
+                    "聚水潭订单店铺字段样例 request_id=%s so_id=%s shop_name=%r shop_id=%r "
+                    "shop_site=%r order_from=%r resolved=%r",
+                    request_id,
+                    sample.get("so_id"),
+                    sample.get("shop_name"),
+                    sample.get("shop_id"),
+                    sample.get("shop_site"),
+                    sample.get("order_from"),
+                    extract_ecommerce_platform(sample, shop_name_map),
+                )
+            added = _merge_orders_into_groups(
+                groups,
+                orders,
+                month_label,
+                seen_orders,
+                shop_name_map=shop_name_map,
+            )
             total_orders += added
             logger.info(
                 "聚水潭订单分页聚合 request_id=%s chunk=%s/%s page=%s "
@@ -227,12 +250,19 @@ def run_monthly_revenue_sync(
     )
 
     try:
+        shop_name_map = jst.query_shops_map()
+    except Exception as e:
+        logger.warning("加载聚水潭店铺映射失败，将仅使用订单内店铺字段 request_id=%s err=%s", request_id, e)
+        shop_name_map = {}
+
+    try:
         total_orders, groups = _fetch_and_aggregate_month_serial(
             jst,
             begin,
             end,
             month_label,
             request_id=request_id,
+            shop_name_map=shop_name_map,
         )
     except Exception as e:
         logger.exception("聚水潭订单查询失败 request_id=%s", request_id)
@@ -243,6 +273,17 @@ def run_monthly_revenue_sync(
     result.orders_fetched = total_orders
     rows = _groups_to_rows(groups)
     result.product_groups = len(rows)
+
+    empty_platforms = sum(1 for r in rows if not r.get(COL_ECOMMERCE_PLATFORM))
+    if empty_platforms:
+        logger.warning(
+            "汇总行中有 %s/%s 条缺少电商平台 request_id=%s",
+            empty_platforms,
+            len(rows),
+            request_id,
+        )
+    if rows:
+        logger.info("写入飞书样例行 request_id=%s sample=%s", request_id, rows[0])
 
     if rows:
         try:

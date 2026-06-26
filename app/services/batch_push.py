@@ -221,12 +221,12 @@ def run_batch_push(
                         index,
                         row.order_no,
                         status=settings.sync_status_failed,
-                        fail_reason=msg or "推送失败",
+                        fail_reason=msg or "同步失败",
                     )
                 )
                 result.upload_failed += 1
 
-    # 2) 查询已推送成功但无快递单号的订单物流
+    # 2) 查询同步成功但无快递单号的订单物流
     so_ids = [r.order_no for r in pending_logistic]
     result.logistic_attempted = len(so_ids)
     tracking_map: dict[str, str] = {}

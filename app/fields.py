@@ -100,3 +100,30 @@ def parse_address(value: Any) -> tuple[str, str, str]:
 
 def now_sync_time_ms() -> int:
     return int(datetime.now().timestamp() * 1000)
+
+
+def extract_ecommerce_platform(
+    order: dict[str, Any],
+    shop_name_map: dict[str, str] | None = None,
+) -> str:
+    """
+    从聚水潭订单解析电商平台名称。
+    订单查询接口部分场景不返回 shop_name，需回退 shop_site / order_from / shop_id 映射。
+    """
+    for key in ("shop_name", "shopName"):
+        name = field_text(order.get(key))
+        if name:
+            return name
+
+    for key in ("shop_site", "order_from"):
+        val = field_text(order.get(key))
+        if val:
+            return val
+
+    shop_id = field_text(order.get("shop_id"))
+    if shop_id and shop_name_map:
+        mapped = shop_name_map.get(shop_id)
+        if mapped:
+            return mapped
+
+    return shop_id
