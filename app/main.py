@@ -110,61 +110,65 @@ def batch_push(
     feishu, jst = _clients(settings)
     request_id = str(uuid.uuid4())
 
-    if _debouncer is None or not _debouncer.try_acquire(table_id):
-        logger.info("防抖拦截 table_id=%s request_id=%s", table_id, request_id)
+    if _debouncer is None or not _debouncer.try_begin(table_id):
+        logger.info("防抖拦截（处理中） table_id=%s request_id=%s", table_id, request_id)
         return BatchPushResponse(
             ok=False,
             request_id=request_id,
             debounced=True,
-            message=f"操作过于频繁，请 {settings.debounce_seconds} 秒后再试",
+            message="上一请求正在处理中，请等待完成后再试",
         )
 
     try:
-        result: BatchPushResult = run_batch_push(
-            table_id=table_id,
-            feishu=feishu,
-            jst=jst,
-            settings=settings,
-        )
-    except Exception as e:
-        logger.exception("批量推送异常 table_id=%s", table_id)
-        log_failure(
-            "api",
-            str(e),
-            path="/api/v1/batch-push",
-            context={"request_id": request_id, "table_id": table_id},
-            exc=e,
-        )
-        raise HTTPException(status_code=502, detail=str(e)) from e
+        try:
+            result: BatchPushResult = run_batch_push(
+                table_id=table_id,
+                feishu=feishu,
+                jst=jst,
+                settings=settings,
+            )
+        except Exception as e:
+            logger.exception("批量推送异常 table_id=%s", table_id)
+            log_failure(
+                "api",
+                str(e),
+                path="/api/v1/batch-push",
+                context={"request_id": request_id, "table_id": table_id},
+                exc=e,
+            )
+            raise HTTPException(status_code=502, detail=str(e)) from e
 
-    if result.errors:
-        log_failure(
-            "batch_push",
-            "批量推送部分步骤失败",
-            path="/api/v1/batch-push",
-            context={
-                "request_id": result.request_id,
-                "table_id": table_id,
+        if result.errors:
+            log_failure(
+                "batch_push",
+                "批量推送部分步骤失败",
+                path="/api/v1/batch-push",
+                context={
+                    "request_id": result.request_id,
+                    "table_id": table_id,
+                    "errors": result.errors,
+                },
+            )
+
+        return BatchPushResponse(
+            ok=True,
+            request_id=result.request_id,
+            message=result.message,
+            detail={
+                "table_id": result.table_id,
+                "total_rows": result.total_rows,
+                "dedup_rows": result.dedup_rows,
+                "upload_attempted": result.upload_attempted,
+                "upload_success": result.upload_success,
+                "upload_failed": result.upload_failed,
+                "logistic_attempted": result.logistic_attempted,
+                "logistic_updated": result.logistic_updated,
                 "errors": result.errors,
             },
         )
-
-    return BatchPushResponse(
-        ok=True,
-        request_id=result.request_id,
-        message=result.message,
-        detail={
-            "table_id": result.table_id,
-            "total_rows": result.total_rows,
-            "dedup_rows": result.dedup_rows,
-            "upload_attempted": result.upload_attempted,
-            "upload_success": result.upload_success,
-            "upload_failed": result.upload_failed,
-            "logistic_attempted": result.logistic_attempted,
-            "logistic_updated": result.logistic_updated,
-            "errors": result.errors,
-        },
-    )
+    finally:
+        if _debouncer is not None:
+            _debouncer.end(table_id)
 
 
 @app.post("/api/v1/monthly-revenue/sync", response_model=MonthlySyncResponse)
