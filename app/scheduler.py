@@ -9,6 +9,7 @@ from app.config import Settings, get_settings
 from app.failure_log import log_failure
 from app.feishu.client import FeishuClient
 from app.jushuitan.client import JushuitanClient
+from app.services.logistics_sync import run_logistics_sync
 from app.services.monthly_revenue import run_monthly_revenue_sync
 
 logger = logging.getLogger(__name__)
@@ -56,6 +57,33 @@ def _monthly_job() -> None:
         )
 
 
+def _logistics_job() -> None:
+    settings = get_settings()
+    feishu, jst = _build_clients(settings)
+    try:
+        result = run_logistics_sync(feishu=feishu, jst=jst, settings=settings)
+        if result.errors:
+            log_failure(
+                "logistics_sync",
+                result.message,
+                path="scheduler/logistics_sync",
+                context={
+                    "request_id": result.request_id,
+                    "table_id": result.table_id,
+                    "errors": result.errors,
+                    "steps": result.steps,
+                },
+            )
+    except Exception as e:
+        logger.exception("定时物流同步任务执行失败")
+        log_failure(
+            "logistics_sync",
+            str(e),
+            path="scheduler/logistics_sync",
+            exc=e,
+        )
+
+
 def start_scheduler() -> BackgroundScheduler:
     global _scheduler
     if _scheduler is not None:
@@ -67,9 +95,15 @@ def start_scheduler() -> BackgroundScheduler:
         id="monthly_revenue_sync",
         replace_existing=True,
     )
+    scheduler.add_job(
+        _logistics_job,
+        CronTrigger(hour=0, minute=0),
+        id="logistics_sync",
+        replace_existing=True,
+    )
     scheduler.start()
     _scheduler = scheduler
-    logger.info("已启动定时任务：每月 6 日 02:00 执行电商营收汇总")
+    logger.info("已启动定时任务：每月 6 日 02:00 电商营收汇总；每日 00:00 物流回写")
     return scheduler
 
 

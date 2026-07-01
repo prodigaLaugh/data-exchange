@@ -126,9 +126,10 @@ def batch_push(
                 feishu=feishu,
                 jst=jst,
                 settings=settings,
+                request_id=request_id,
             )
         except Exception as e:
-            logger.exception("批量推送异常 table_id=%s", table_id)
+            logger.exception("批量推送异常 table_id=%s request_id=%s", table_id, request_id)
             log_failure(
                 "api",
                 str(e),
@@ -136,7 +137,10 @@ def batch_push(
                 context={"request_id": request_id, "table_id": table_id},
                 exc=e,
             )
-            raise HTTPException(status_code=502, detail=str(e)) from e
+            raise HTTPException(
+                status_code=502,
+                detail={"request_id": request_id, "error": str(e)},
+            ) from e
 
         if result.errors:
             log_failure(
@@ -147,11 +151,12 @@ def batch_push(
                     "request_id": result.request_id,
                     "table_id": table_id,
                     "errors": result.errors,
+                    "steps": result.steps,
                 },
             )
 
         return BatchPushResponse(
-            ok=True,
+            ok=len(result.errors) == 0 and result.upload_failed == 0,
             request_id=result.request_id,
             message=result.message,
             detail={
@@ -164,6 +169,8 @@ def batch_push(
                 "logistic_attempted": result.logistic_attempted,
                 "logistic_updated": result.logistic_updated,
                 "errors": result.errors,
+                "upload_results": result.upload_results,
+                "steps": result.steps,
             },
         )
     finally:

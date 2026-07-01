@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import Settings
+from app.failure_log import log_batch_push_trace
 from app.feishu.client import FeishuClient
 from app.fields import (
     COL_ADDRESS,
@@ -22,9 +23,10 @@ from app.fields import (
     COL_SYNC_STATUS,
     COL_SYNC_TIME,
     COL_TOTAL_AMOUNT,
-    COL_TRACKING_NO,
     field_text,
     feishu_sync_time_value,
+    field_int,
+    field_money,
     format_order_date,
     parse_address,
 )
@@ -33,7 +35,6 @@ from app.jushuitan.client import JushuitanClient
 logger = logging.getLogger(__name__)
 
 UPLOAD_BATCH_SIZE = 20
-LOGISTIC_BATCH_SIZE = 50
 
 
 @dataclass
@@ -57,6 +58,8 @@ class BatchPushResult:
     debounced: bool = False
     message: str = ""
     errors: list[str] = field(default_factory=list)
+    steps: list[dict[str, Any]] = field(default_factory=list)
+    upload_results: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _index_by_order_no(records: list[dict[str, Any]]) -> dict[str, list[TableRow]]:
@@ -91,10 +94,10 @@ def _build_jst_order(row: TableRow) -> dict[str, Any]:
     item = {
         "sku_id": field_text(f.get(COL_BARCODE)),
         "shop_sku_id": field_text(f.get(COL_BARCODE)),
-        "amount": field_text(f.get(COL_TOTAL_AMOUNT)),
-        "base_price": field_text(f.get(COL_RETAIL_PRICE)),
-        "price": field_text(f.get(COL_DISCOUNT_PRICE)),
-        "qty": field_text(f.get(COL_QTY)),
+        "amount": field_money(f.get(COL_TOTAL_AMOUNT)),
+        "base_price": field_money(f.get(COL_RETAIL_PRICE)),
+        "price": field_money(f.get(COL_DISCOUNT_PRICE), decimals=4),
+        "qty": field_int(f.get(COL_QTY)),
         "name": field_text(f.get(COL_PRODUCT_NAME)),
         "outer_oi_id": order_no,
     }
@@ -107,10 +110,71 @@ def _build_jst_order(row: TableRow) -> dict[str, Any]:
         "receiver_address": address,
         "receiver_name": name,
         "receiver_phone": phone,
-        "pay_amount": field_text(f.get(COL_TOTAL_AMOUNT)),
-        "freight": field_text(f.get(COL_FREIGHT)),
+        "pay_amount": field_money(f.get(COL_TOTAL_AMOUNT)),
+        "freight": field_money(f.get(COL_FREIGHT)),
         "items": [item],
     }
+
+
+def _sanitize_jst_order(order: dict[str, Any]) -> dict[str, Any]:
+    """日志/trace 用：脱敏地址电话，保留业务排查字段。"""
+    safe = dict(order)
+    if safe.get("receiver_phone"):
+        safe["receiver_phone"] = "***"
+    addr = str(safe.get("receiver_address") or "")
+    if len(addr) > 24:
+        safe["receiver_address"] = addr[:24] + "..."
+    name = str(safe.get("receiver_name") or "")
+    if name:
+        safe["receiver_name"] = name[0] + "**" if len(name) > 1 else "*"
+    return safe
+
+
+def _summarize_jst_response(resp: dict[str, Any] | None) -> dict[str, Any]:
+    if not resp:
+        return {"so_id": "", "issuccess": False, "msg": "未返回该订单结果", "o_id": ""}
+    return {
+        "so_id": field_text(resp.get("so_id")),
+        "issuccess": resp.get("issuccess"),
+        "msg": field_text(resp.get("msg")),
+        "o_id": field_text(resp.get("o_id")),
+    }
+
+
+def _summarize_feishu_updates(updates: list[dict[str, Any]], *, limit: int = 5) -> list[dict[str, Any]]:
+    sample: list[dict[str, Any]] = []
+    for u in updates[:limit]:
+        fields = u.get("fields") or {}
+        sample.append(
+            {
+                "record_id": u.get("record_id"),
+                "fields": dict(fields) if isinstance(fields, dict) else fields,
+            }
+        )
+    return sample
+
+
+class _PushTracer:
+    def __init__(self, request_id: str, table_id: str) -> None:
+        self.request_id = request_id
+        self.table_id = table_id
+        self.steps: list[dict[str, Any]] = []
+
+    def record(self, step: str, ok: bool, **detail: Any) -> None:
+        entry: dict[str, Any] = {"step": step, "ok": ok, **detail}
+        self.steps.append(entry)
+        logger.info(
+            "batch_push step request_id=%s table_id=%s step=%s ok=%s detail=%s",
+            self.request_id,
+            self.table_id,
+            step,
+            ok,
+            {k: v for k, v in detail.items() if k != "request_body"},
+        )
+        log_batch_push_trace(
+            self.request_id,
+            {"table_id": self.table_id, "trace_step": entry},
+        )
 
 
 def _make_status_update(
@@ -130,7 +194,6 @@ def _make_status_update(
                 use_ms=settings.sync_time_use_ms,
             ),
         }
-        # 多行文本字段不能写空字符串，成功时省略「失败原因」
         if fail_reason:
             fields[COL_FAIL_REASON] = fail_reason
         updates.append({"record_id": row.record_id, "fields": fields})
@@ -143,8 +206,10 @@ def run_batch_push(
     feishu: FeishuClient,
     jst: JushuitanClient,
     settings: Settings,
+    request_id: str | None = None,
 ) -> BatchPushResult:
-    request_id = str(uuid.uuid4())
+    request_id = request_id or str(uuid.uuid4())
+    tracer = _PushTracer(request_id, table_id)
     result = BatchPushResult(
         request_id=request_id,
         table_id=table_id,
@@ -158,6 +223,8 @@ def run_batch_push(
     )
 
     logger.info("开始批量推送 request_id=%s table_id=%s", request_id, table_id)
+    tracer.record("start", True, table_id=table_id)
+
     records = feishu.list_all_records(table_id)
     result.total_rows = len(records)
     index = _index_by_order_no(records)
@@ -169,42 +236,78 @@ def run_batch_push(
         for row in deduped.values()
         if field_text(row.fields.get(COL_SYNC_STATUS)) != settings.sync_status_success
     ]
-    pending_logistic = [
-        row
-        for row in deduped.values()
-        if field_text(row.fields.get(COL_SYNC_STATUS)) == settings.sync_status_success
-        and not field_text(row.fields.get(COL_TRACKING_NO))
-    ]
+
+    tracer.record(
+        "feishu_list",
+        True,
+        total_rows=result.total_rows,
+        dedup_rows=result.dedup_rows,
+        rows_with_order_no=sum(len(v) for v in index.values()),
+        pending_upload=len(pending_upload),
+        pending_upload_orders=[r.order_no for r in pending_upload],
+    )
 
     feishu_updates: list[dict[str, Any]] = []
 
     # 1) 推送未成功的订单到聚水潭
+    batch_no = 0
     for i in range(0, len(pending_upload), UPLOAD_BATCH_SIZE):
         batch = pending_upload[i : i + UPLOAD_BATCH_SIZE]
+        batch_no += 1
         orders = [_build_jst_order(r) for r in batch]
         result.upload_attempted += len(batch)
+        request_summary = {
+            "batch": batch_no,
+            "order_count": len(orders),
+            "so_ids": [o["so_id"] for o in orders],
+            "orders": [_sanitize_jst_order(o) for o in orders],
+        }
         try:
             responses = jst.upload_orders(orders)
         except Exception as e:
-            logger.exception("订单上传批次失败 request_id=%s", request_id)
-            result.errors.append(str(e))
+            logger.exception("订单上传批次失败 request_id=%s batch=%s", request_id, batch_no)
+            err = str(e)
+            result.errors.append(err)
+            tracer.record(
+                "jst_upload",
+                False,
+                batch=batch_no,
+                request=request_summary,
+                error=err,
+            )
             for row in batch:
+                result.upload_results.append(
+                    {
+                        "so_id": row.order_no,
+                        "status": "failed",
+                        "stage": "jst_upload_http",
+                        "msg": err,
+                    }
+                )
                 feishu_updates.extend(
                     _make_status_update(
                         index,
                         row.order_no,
                         status=settings.sync_status_failed,
-                        fail_reason=str(e),
+                        fail_reason=err,
                         settings=settings,
                     )
                 )
                 result.upload_failed += 1
             continue
 
+        response_summary = [_summarize_jst_response(r) for r in responses]
+        batch_ok = True
         resp_map = {field_text(r.get("so_id")): r for r in responses}
+        batch_order_results: list[dict[str, Any]] = []
+
         for row in batch:
             resp = resp_map.get(row.order_no)
+            summary = _summarize_jst_response(resp)
             if resp and resp.get("issuccess") is True:
+                batch_order_results.append(
+                    {**summary, "status": "success", "stage": "jst_upload"}
+                )
                 feishu_updates.extend(
                     _make_status_update(
                         index,
@@ -215,54 +318,73 @@ def run_batch_push(
                 )
                 result.upload_success += 1
             else:
-                msg = field_text(resp.get("msg") if resp else "未返回该订单结果")
+                batch_ok = False
+                msg = summary["msg"] or "同步失败"
+                batch_order_results.append(
+                    {**summary, "status": "failed", "stage": "jst_upload", "msg": msg}
+                )
                 feishu_updates.extend(
                     _make_status_update(
                         index,
                         row.order_no,
                         status=settings.sync_status_failed,
-                        fail_reason=msg or "同步失败",
+                        fail_reason=msg,
                         settings=settings,
                     )
                 )
                 result.upload_failed += 1
 
-    # 2) 查询同步成功但无快递单号的订单物流
-    so_ids = [r.order_no for r in pending_logistic]
-    result.logistic_attempted = len(so_ids)
-    tracking_map: dict[str, str] = {}
-
-    for i in range(0, len(so_ids), LOGISTIC_BATCH_SIZE):
-        chunk = so_ids[i : i + LOGISTIC_BATCH_SIZE]
-        try:
-            logistics = jst.query_logistics(chunk)
-        except Exception as e:
-            logger.exception("物流查询失败 request_id=%s chunk=%s", request_id, chunk[:3])
-            result.errors.append(str(e))
-            continue
-        for item in logistics:
-            so_id = field_text(item.get("so_id"))
-            l_id = field_text(item.get("l_id") or item.get("logistics_no") or item.get("快递单号"))
-            if so_id and l_id:
-                tracking_map[so_id] = l_id
-
-    for order_no, tracking_no in tracking_map.items():
-        for row in index.get(order_no, []):
-            feishu_updates.append(
-                {
-                    "record_id": row.record_id,
-                    "fields": {COL_TRACKING_NO: tracking_no},
-                }
-            )
-            result.logistic_updated += 1
+        result.upload_results.extend(batch_order_results)
+        tracer.record(
+            "jst_upload",
+            batch_ok,
+            batch=batch_no,
+            request=request_summary,
+            response=response_summary,
+            order_results=batch_order_results,
+        )
 
     if feishu_updates:
-        feishu.batch_update_records(table_id, feishu_updates)
+        update_summary = {
+            "update_count": len(feishu_updates),
+            "sample": _summarize_feishu_updates(feishu_updates),
+        }
+        try:
+            updated = feishu.batch_update_records(table_id, feishu_updates)
+            tracer.record("feishu_update", True, **update_summary, rows_updated=updated)
+        except Exception as e:
+            err = str(e)
+            tracer.record("feishu_update", False, **update_summary, error=err)
+            log_batch_push_trace(
+                request_id,
+                {
+                    "table_id": table_id,
+                    "event": "failed",
+                    "error": err,
+                    "steps": tracer.steps,
+                },
+            )
+            raise
+    else:
+        tracer.record("feishu_update", True, skipped=True, reason="无待回写记录")
 
+    result.steps = tracer.steps
     result.message = (
         f"推送完成：上传 {result.upload_attempted} 条（成功 {result.upload_success}，"
-        f"失败 {result.upload_failed}）；物流查询 {result.logistic_attempted} 条，"
-        f"回写快递单号 {result.logistic_updated} 行"
+        f"失败 {result.upload_failed}）"
+    )
+    log_batch_push_trace(
+        request_id,
+        {
+            "table_id": table_id,
+            "event": "completed",
+            "message": result.message,
+            "upload_attempted": result.upload_attempted,
+            "upload_success": result.upload_success,
+            "upload_failed": result.upload_failed,
+            "errors": result.errors,
+            "steps": tracer.steps,
+        },
     )
     logger.info("批量推送结束 request_id=%s %s", request_id, result.message)
     return result

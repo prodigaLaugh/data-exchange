@@ -56,6 +56,15 @@ def field_number(value: Any) -> float:
         return 0.0
 
 
+def field_int(value: Any) -> int:
+    return int(round(field_number(value)))
+
+
+def field_money(value: Any, *, decimals: int = 2) -> float:
+    n = field_number(value)
+    return round(n, decimals)
+
+
 def field_datetime_ms(value: Any) -> int | None:
     if value is None:
         return None
