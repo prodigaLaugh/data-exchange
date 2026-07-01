@@ -222,30 +222,33 @@ class JushuitanClient:
             return []
         return [o for o in orders if isinstance(o, dict)]
 
-    def query_shops_map(self) -> dict[str, str]:
-        """shop_id -> shop_name，用于订单缺少 shop_name 时回填。"""
-        mapping: dict[str, str] = {}
+    def query_shops_all(self) -> list[dict[str, Any]]:
+        shops: list[dict[str, Any]] = []
         page = 1
         while True:
             data = self._biz_post(
                 "/open/shops/query",
                 {"page_index": page, "page_size": 100},
             )
-            shops = data.get("shops") or []
-            if not isinstance(shops, list):
-                shops = []
-            for shop in shops:
-                if not isinstance(shop, dict):
-                    continue
-                shop_id = shop.get("shop_id")
-                shop_name = shop.get("shop_name")
-                if shop_id is None or not shop_name:
-                    continue
-                mapping[str(shop_id).strip()] = str(shop_name).strip()
-            if not data.get("has_next") or not shops:
+            batch = data.get("shops") or []
+            if not isinstance(batch, list):
+                batch = []
+            shops.extend([s for s in batch if isinstance(s, dict)])
+            if not data.get("has_next") or not batch:
                 break
             page += 1
-        logger.info("已加载聚水潭店铺映射 %s 条", len(mapping))
+        logger.info("已加载聚水潭店铺列表 %s 条", len(shops))
+        return shops
+
+    def query_shops_map(self) -> dict[str, str]:
+        """shop_id -> shop_name，用于订单缺少 shop_name 时回填。"""
+        mapping: dict[str, str] = {}
+        for shop in self.query_shops_all():
+            shop_id = shop.get("shop_id")
+            shop_name = shop.get("shop_name")
+            if shop_id is None or not shop_name:
+                continue
+            mapping[str(shop_id).strip()] = str(shop_name).strip()
         return mapping
 
     def query_orders(

@@ -31,6 +31,8 @@ from app.fields import (
     parse_address,
 )
 from app.jushuitan.client import JushuitanClient
+from app.jushuitan.shop_resolver import build_shop_id_resolver
+from app.jushuitan.sign import biz_json
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +88,7 @@ def _dedup_rows(index: dict[str, list[TableRow]]) -> dict[str, TableRow]:
     return deduped
 
 
-def _build_jst_order(row: TableRow) -> dict[str, Any]:
+def _build_jst_order(row: TableRow, *, shop_id: int) -> dict[str, Any]:
     f = row.fields
     address, name, phone = parse_address(f.get(COL_ADDRESS))
     channel = field_text(f.get(COL_CHANNEL))
@@ -101,24 +103,28 @@ def _build_jst_order(row: TableRow) -> dict[str, Any]:
         "name": field_text(f.get(COL_PRODUCT_NAME)),
         "outer_oi_id": order_no,
     }
-    return {
-        "shop_id": channel,
+    order: dict[str, Any] = {
+        "shop_id": shop_id,
         "so_id": order_no,
         "order_date": format_order_date(f.get(COL_ORDER_DATE)),
         "shop_status": "WAIT_SELLER_SEND_GOODS",
-        "shop_buyer_id": channel,
+        "shop_buyer_id": channel or str(shop_id),
         "receiver_address": address,
         "receiver_name": name,
-        "receiver_phone": phone,
         "pay_amount": field_money(f.get(COL_TOTAL_AMOUNT)),
         "freight": field_money(f.get(COL_FREIGHT)),
         "items": [item],
     }
+    if phone:
+        order["receiver_phone"] = phone
+    return order
 
 
 def _sanitize_jst_order(order: dict[str, Any]) -> dict[str, Any]:
-    """日志/trace 用：脱敏地址电话，保留业务排查字段。"""
-    safe = dict(order)
+    """日志/trace 用：脱敏地址电话，保留数值类型便于核对。"""
+    import copy
+
+    safe = copy.deepcopy(order)
     if safe.get("receiver_phone"):
         safe["receiver_phone"] = "***"
     addr = str(safe.get("receiver_address") or "")
@@ -127,7 +133,16 @@ def _sanitize_jst_order(order: dict[str, Any]) -> dict[str, Any]:
     name = str(safe.get("receiver_name") or "")
     if name:
         safe["receiver_name"] = name[0] + "**" if len(name) > 1 else "*"
+    items = safe.get("items")
+    if isinstance(items, list):
+        safe["items"] = items
     return safe
+
+
+def _truncate_fail_reason(msg: str, *, max_len: int = 500) -> str:
+    if len(msg) <= max_len:
+        return msg
+    return msg[: max_len - 3] + "..."
 
 
 def _summarize_jst_response(resp: dict[str, Any] | None) -> dict[str, Any]:
@@ -195,7 +210,7 @@ def _make_status_update(
             ),
         }
         if fail_reason:
-            fields[COL_FAIL_REASON] = fail_reason
+            fields[COL_FAIL_REASON] = _truncate_fail_reason(fail_reason)
         updates.append({"record_id": row.record_id, "fields": fields})
     return updates
 
@@ -223,7 +238,25 @@ def run_batch_push(
     )
 
     logger.info("开始批量推送 request_id=%s table_id=%s", request_id, table_id)
-    tracer.record("start", True, table_id=table_id)
+    tracer.record("start", True, table_id=table_id, build="batch-push-v2")
+
+    try:
+        shops = jst.query_shops_all()
+        shop_resolver = build_shop_id_resolver(shops)
+        shop_index = [
+            {
+                "shop_id": s.get("shop_id"),
+                "shop_name": s.get("shop_name"),
+                "nick": s.get("nick"),
+                "short_name": s.get("short_name"),
+            }
+            for s in shops
+        ]
+        tracer.record("jst_shops", True, shop_count=len(shops), shops=shop_index[:20])
+    except Exception as e:
+        logger.warning("加载聚水潭店铺列表失败 request_id=%s err=%s", request_id, e)
+        shop_resolver = build_shop_id_resolver([])
+        tracer.record("jst_shops", False, error=str(e))
 
     records = feishu.list_all_records(table_id)
     result.total_rows = len(records)
@@ -254,13 +287,58 @@ def run_batch_push(
     for i in range(0, len(pending_upload), UPLOAD_BATCH_SIZE):
         batch = pending_upload[i : i + UPLOAD_BATCH_SIZE]
         batch_no += 1
-        orders = [_build_jst_order(r) for r in batch]
-        result.upload_attempted += len(batch)
+        orders: list[dict[str, Any]] = []
+        batch_skipped: list[dict[str, Any]] = []
+
+        for row in batch:
+            channel = field_text(row.fields.get(COL_CHANNEL))
+            resolved_shop_id = shop_resolver(channel)
+            if resolved_shop_id is None:
+                msg = (
+                    f"渠道编码「{channel}」无法映射到聚水潭数字 shop_id，"
+                    f"请填写聚水潭店铺编号或在 ERP【店铺设置】核对店铺名称/编号"
+                )
+                batch_skipped.append({"so_id": row.order_no, "channel": channel, "msg": msg})
+                result.upload_attempted += 1
+                result.upload_failed += 1
+                result.upload_results.append(
+                    {
+                        "so_id": row.order_no,
+                        "status": "failed",
+                        "stage": "shop_id_resolve",
+                        "msg": msg,
+                    }
+                )
+                feishu_updates.extend(
+                    _make_status_update(
+                        index,
+                        row.order_no,
+                        status=settings.sync_status_failed,
+                        fail_reason=msg,
+                        settings=settings,
+                    )
+                )
+                continue
+            orders.append(_build_jst_order(row, shop_id=resolved_shop_id))
+
+        if batch_skipped:
+            tracer.record(
+                "shop_id_resolve",
+                False,
+                batch=batch_no,
+                skipped=batch_skipped,
+            )
+
+        if not orders:
+            continue
+
+        result.upload_attempted += len(orders)
         request_summary = {
             "batch": batch_no,
             "order_count": len(orders),
             "so_ids": [o["so_id"] for o in orders],
             "orders": [_sanitize_jst_order(o) for o in orders],
+            "biz_json_sample": biz_json(orders[:1])[:800],
         }
         try:
             responses = jst.upload_orders(orders)

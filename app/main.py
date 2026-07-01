@@ -160,6 +160,7 @@ def batch_push(
             request_id=result.request_id,
             message=result.message,
             detail={
+                "build": "batch-push-v2",
                 "table_id": result.table_id,
                 "total_rows": result.total_rows,
                 "dedup_rows": result.dedup_rows,
