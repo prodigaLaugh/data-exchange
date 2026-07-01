@@ -102,6 +102,25 @@ def now_sync_time_ms() -> int:
     return int(datetime.now().timestamp() * 1000)
 
 
+def now_sync_time_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def feishu_sync_time_value(existing: Any, *, use_ms: bool) -> int | str:
+    """
+    写入飞书「同步时间」列。
+    - 日期字段(use_ms=True)：Unix 毫秒时间戳
+    - 文本字段(use_ms=False)：YYYY-MM-DD HH:mm:ss 字符串
+    若该行已有值，按已有值的类型自动对齐。
+    """
+    if isinstance(existing, (int, float)) and existing:
+        return now_sync_time_ms()
+    text = field_text(existing)
+    if text and not text.replace(".", "", 1).isdigit():
+        return now_sync_time_str()
+    return now_sync_time_ms() if use_ms else now_sync_time_str()
+
+
 def extract_ecommerce_platform(
     order: dict[str, Any],
     shop_name_map: dict[str, str] | None = None,

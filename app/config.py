@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     sync_status_success: str = Field("同步成功", alias="SYNC_STATUS_SUCCESS")
     sync_status_failed: str = Field("同步失败", alias="SYNC_STATUS_FAILED")
     sync_status_pending: str = Field("待同步", alias="SYNC_STATUS_PENDING")
+    # True=飞书「同步时间」为日期字段(写毫秒)；False=文本字段(写 YYYY-MM-DD HH:mm:ss)
+    sync_time_use_ms: bool = Field(False, alias="SYNC_TIME_USE_MS")
 
 
 @lru_cache

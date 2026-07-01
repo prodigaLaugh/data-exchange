@@ -24,8 +24,8 @@ from app.fields import (
     COL_TOTAL_AMOUNT,
     COL_TRACKING_NO,
     field_text,
+    feishu_sync_time_value,
     format_order_date,
-    now_sync_time_ms,
     parse_address,
 )
 from app.jushuitan.client import JushuitanClient
@@ -113,28 +113,26 @@ def _build_jst_order(row: TableRow) -> dict[str, Any]:
     }
 
 
-def _sync_time_field() -> int:
-    return now_sync_time_ms()
-
-
 def _make_status_update(
     index: dict[str, list[TableRow]],
     order_no: str,
     *,
     status: str,
     fail_reason: str = "",
+    settings: Settings,
 ) -> list[dict[str, Any]]:
     updates: list[dict[str, Any]] = []
-    sync_time = _sync_time_field()
     for row in index.get(order_no, []):
         fields: dict[str, Any] = {
             COL_SYNC_STATUS: status,
-            COL_SYNC_TIME: sync_time,
+            COL_SYNC_TIME: feishu_sync_time_value(
+                row.fields.get(COL_SYNC_TIME),
+                use_ms=settings.sync_time_use_ms,
+            ),
         }
+        # 多行文本字段不能写空字符串，成功时省略「失败原因」
         if fail_reason:
             fields[COL_FAIL_REASON] = fail_reason
-        else:
-            fields[COL_FAIL_REASON] = ""
         updates.append({"record_id": row.record_id, "fields": fields})
     return updates
 
@@ -197,6 +195,7 @@ def run_batch_push(
                         row.order_no,
                         status=settings.sync_status_failed,
                         fail_reason=str(e),
+                        settings=settings,
                     )
                 )
                 result.upload_failed += 1
@@ -211,6 +210,7 @@ def run_batch_push(
                         index,
                         row.order_no,
                         status=settings.sync_status_success,
+                        settings=settings,
                     )
                 )
                 result.upload_success += 1
@@ -222,6 +222,7 @@ def run_batch_push(
                         row.order_no,
                         status=settings.sync_status_failed,
                         fail_reason=msg or "同步失败",
+                        settings=settings,
                     )
                 )
                 result.upload_failed += 1
