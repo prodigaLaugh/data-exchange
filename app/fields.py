@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -96,15 +97,53 @@ def format_order_date(value: Any) -> str:
 
 
 def parse_address(value: Any) -> tuple[str, str, str]:
-    text = field_text(value)
+    """
+    解析飞书「收货地址」单元格。
+    支持：
+    1) 收货地址：… 收货人：… 手机号：… [备注：…]（多空格归一后按标签切分）
+    2) 旧格式：地址 姓名 电话（空格分隔）
+    """
+    text = re.sub(r"\s+", " ", field_text(value)).strip()
     if not text:
         return "", "", ""
-    parts = text.split()
+
+    label_re = re.compile(r"(收货地址|收货人|手机号|手机|备注)[:：]?\s*")
+    matches = list(label_re.finditer(text))
+    if matches:
+        fields: dict[str, str] = {}
+        for i, m in enumerate(matches):
+            label = m.group(1)
+            start = m.end()
+            end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
+            val = text[start:end].strip()
+            if label == "收货地址":
+                fields["address"] = val
+            elif label == "收货人":
+                fields["name"] = val
+            elif label in ("手机号", "手机"):
+                fields["phone"] = val
+        address = fields.get("address", "")
+        name = fields.get("name", "")
+        phone = fields.get("phone", "")
+        if not phone:
+            phone = _extract_mobile(name) or _extract_mobile(text)
+        if name and phone and phone in name:
+            name = name.replace(phone, "").strip()
+        return address, name, phone
+
+    parts = text.split(" ")
     if len(parts) >= 3:
-        return parts[0], parts[1], " ".join(parts[2:])
+        return parts[0], parts[1], parts[2]
     if len(parts) == 2:
-        return parts[0], parts[1], ""
-    return text, "", ""
+        phone = _extract_mobile(parts[1])
+        name = parts[1].replace(phone, "").strip() if phone else parts[1]
+        return parts[0], name, phone
+    return text, "", _extract_mobile(text)
+
+
+def _extract_mobile(text: str) -> str:
+    m = re.search(r"1\d{10}", text or "")
+    return m.group(0) if m else ""
 
 
 def now_sync_time_ms() -> int:
