@@ -31,7 +31,7 @@ from app.fields import (
     parse_address,
 )
 from app.jushuitan.client import JushuitanClient
-from app.jushuitan.shop_resolver import build_shop_id_resolver
+from app.jushuitan.shop_resolver import parse_shop_id
 from app.jushuitan.sign import biz_json
 
 logger = logging.getLogger(__name__)
@@ -108,7 +108,7 @@ def _build_jst_order(row: TableRow, *, shop_id: int) -> dict[str, Any]:
         "so_id": order_no,
         "order_date": format_order_date(f.get(COL_ORDER_DATE)),
         "shop_status": "WAIT_SELLER_SEND_GOODS",
-        "shop_buyer_id": channel or str(shop_id),
+        "shop_buyer_id": str(shop_id),
         "receiver_address": address,
         "receiver_name": name,
         "pay_amount": field_money(f.get(COL_TOTAL_AMOUNT)),
@@ -240,24 +240,6 @@ def run_batch_push(
     logger.info("开始批量推送 request_id=%s table_id=%s", request_id, table_id)
     tracer.record("start", True, table_id=table_id, build="batch-push-v2")
 
-    try:
-        shops = jst.query_shops_all()
-        shop_resolver = build_shop_id_resolver(shops)
-        shop_index = [
-            {
-                "shop_id": s.get("shop_id"),
-                "shop_name": s.get("shop_name"),
-                "nick": s.get("nick"),
-                "short_name": s.get("short_name"),
-            }
-            for s in shops
-        ]
-        tracer.record("jst_shops", True, shop_count=len(shops), shops=shop_index[:20])
-    except Exception as e:
-        logger.warning("加载聚水潭店铺列表失败 request_id=%s err=%s", request_id, e)
-        shop_resolver = build_shop_id_resolver([])
-        tracer.record("jst_shops", False, error=str(e))
-
     records = feishu.list_all_records(table_id)
     result.total_rows = len(records)
     index = _index_by_order_no(records)
@@ -292,12 +274,9 @@ def run_batch_push(
 
         for row in batch:
             channel = field_text(row.fields.get(COL_CHANNEL))
-            resolved_shop_id = shop_resolver(channel)
+            resolved_shop_id = parse_shop_id(channel)
             if resolved_shop_id is None:
-                msg = (
-                    f"渠道编码「{channel}」无法映射到聚水潭数字 shop_id，"
-                    f"请填写聚水潭店铺编号或在 ERP【店铺设置】核对店铺名称/编号"
-                )
+                msg = f"渠道编码「{channel}」不是有效的聚水潭 shop_id（须为数字）"
                 batch_skipped.append({"so_id": row.order_no, "channel": channel, "msg": msg})
                 result.upload_attempted += 1
                 result.upload_failed += 1
