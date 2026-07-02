@@ -1,7 +1,17 @@
 from functools import lru_cache
+from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _abs_path(value: str) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        return str(path)
+    return str((_PROJECT_ROOT / path).resolve())
 
 
 class Settings(BaseSettings):
@@ -34,6 +44,13 @@ class Settings(BaseSettings):
     sync_status_pending: str = Field("待同步", alias="SYNC_STATUS_PENDING")
     # True=飞书「同步时间」为日期字段(写毫秒)；False=文本字段(写 YYYY-MM-DD HH:mm:ss)
     sync_time_use_ms: bool = Field(False, alias="SYNC_TIME_USE_MS")
+
+    @model_validator(mode="after")
+    def _resolve_paths(self) -> "Settings":
+        object.__setattr__(self, "log_dir", _abs_path(self.log_dir))
+        object.__setattr__(self, "jst_token_file", _abs_path(self.jst_token_file))
+        object.__setattr__(self, "push_state_file", _abs_path(self.push_state_file))
+        return self
 
 
 @lru_cache

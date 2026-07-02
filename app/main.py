@@ -6,14 +6,19 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import Settings, get_settings
 from app.debounce import Debouncer
-from app.failure_log import log_failure
+from app.failure_log import log_api_error, set_log_dir
 from app.feishu.client import FeishuClient
 from app.jushuitan.client import JushuitanClient
+from app.request_log import (
+    RequestBodyMiddleware,
+    build_request_snapshot,
+    register_exception_handlers,
+)
 from app.scheduler import shutdown_scheduler, start_scheduler
 from app.services.batch_push import BatchPushResult, run_batch_push
 from app.services.monthly_revenue import MonthlyRevenueResult, run_monthly_revenue_sync
@@ -34,12 +39,13 @@ def setup_logging(level: str) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     settings = get_settings()
+    set_log_dir(settings.log_dir)
     setup_logging(settings.log_level)
     Path(settings.log_dir).mkdir(parents=True, exist_ok=True)
     global _debouncer
     _debouncer = Debouncer(settings.debounce_seconds)
     start_scheduler()
-    logger.info("服务已启动")
+    logger.info("服务已启动，日志目录: %s", settings.log_dir)
     yield
     shutdown_scheduler()
     logger.info("服务已停止")
@@ -50,6 +56,8 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+register_exception_handlers(app)
+app.add_middleware(RequestBodyMiddleware)
 
 
 class BatchPushRequest(BaseModel):
@@ -111,12 +119,13 @@ def _clients(settings: Settings) -> tuple[FeishuClient, JushuitanClient]:
 
 
 @app.get("/health")
-def health() -> dict[str, str]:
-    return {"status": "ok"}
+def health(settings: Settings = Depends(get_settings)) -> dict[str, str]:
+    return {"status": "ok", "log_dir": settings.log_dir}
 
 
 @app.post("/api/v1/batch-push", response_model=BatchPushResponse)
 def batch_push(
+    request: Request,
     body: BatchPushRequest,
     _: Annotated[None, Depends(verify_submit_key)],
     settings: Settings = Depends(get_settings),
@@ -148,32 +157,12 @@ def batch_push(
             )
         except Exception as e:
             logger.exception("批量推送异常 table_id=%s request_id=%s", table_id, request_id)
-            log_failure(
-                "api",
-                str(e),
-                path="/api/v1/batch-push",
-                context={"request_id": request_id, "table_id": table_id},
-                exc=e,
-            )
             raise HTTPException(
                 status_code=502,
                 detail={"request_id": request_id, "error": str(e)},
             ) from e
 
-        if result.errors:
-            log_failure(
-                "batch_push",
-                "批量推送部分步骤失败",
-                path="/api/v1/batch-push",
-                context={
-                    "request_id": result.request_id,
-                    "table_id": table_id,
-                    "errors": result.errors,
-                    "steps": result.steps,
-                },
-            )
-
-        return BatchPushResponse(
+        response = BatchPushResponse(
             ok=len(result.errors) == 0 and result.upload_failed == 0,
             request_id=result.request_id,
             message=result.message,
@@ -192,6 +181,18 @@ def batch_push(
                 "steps": result.steps,
             },
         )
+        if not response.ok or result.errors:
+            log_api_error(
+                source="batch_push",
+                message=result.message or "批量推送失败",
+                request_snapshot=build_request_snapshot(request),
+                response_status=200,
+                response_body=response.model_dump(),
+                trace_file="batch-push",
+                request_id=result.request_id,
+                context={"table_id": table_id},
+            )
+        return response
     finally:
         if _debouncer is not None:
             _debouncer.end(table_id)
@@ -199,6 +200,7 @@ def batch_push(
 
 @app.post("/api/v1/push-jushuitan", response_model=SinglePushResponse)
 def push_jushuitan(
+    request: Request,
     body: SinglePushRequest,
     _: Annotated[None, Depends(verify_submit_key)],
     settings: Settings = Depends(get_settings),
@@ -237,33 +239,12 @@ def push_jushuitan(
             )
         except Exception as e:
             logger.exception("单行推送异常 record_id=%s request_id=%s", record_id, request_id)
-            log_failure(
-                "api",
-                str(e),
-                path="/api/v1/push-jushuitan",
-                context={"request_id": request_id, "record_id": record_id},
-                exc=e,
-            )
             raise HTTPException(
                 status_code=502,
                 detail={"request_id": request_id, "error": str(e)},
             ) from e
 
-        if result.errors:
-            log_failure(
-                "single_push",
-                result.message or "单行推送失败",
-                path="/api/v1/push-jushuitan",
-                context={
-                    "request_id": result.request_id,
-                    "record_id": record_id,
-                    "so_id": result.so_id,
-                    "errors": result.errors,
-                    "steps": result.steps,
-                },
-            )
-
-        return SinglePushResponse(
+        response = SinglePushResponse(
             ok=result.ok,
             request_id=result.request_id,
             message=result.message,
@@ -277,6 +258,18 @@ def push_jushuitan(
                 "steps": result.steps,
             },
         )
+        if not response.ok or result.errors:
+            log_api_error(
+                source="single_push",
+                message=result.message or "单行推送失败",
+                request_snapshot=build_request_snapshot(request),
+                response_status=200,
+                response_body=response.model_dump(),
+                trace_file="single-push",
+                request_id=result.request_id,
+                context={"record_id": record_id, "so_id": result.so_id},
+            )
+        return response
     finally:
         if _debouncer is not None:
             _debouncer.end(debounce_key)
@@ -284,6 +277,7 @@ def push_jushuitan(
 
 @app.post("/api/v1/monthly-revenue/sync", response_model=MonthlySyncResponse)
 def manual_monthly_sync(
+    request: Request,
     _: Annotated[None, Depends(verify_submit_key)],
     settings: Settings = Depends(get_settings),
 ) -> MonthlySyncResponse:
@@ -297,27 +291,9 @@ def manual_monthly_sync(
         )
     except Exception as e:
         logger.exception("手动月度汇总失败")
-        log_failure(
-            "api",
-            str(e),
-            path="/api/v1/monthly-revenue/sync",
-            exc=e,
-        )
         raise HTTPException(status_code=502, detail=str(e)) from e
 
-    if result.errors:
-        log_failure(
-            "monthly_revenue",
-            result.message,
-            path="/api/v1/monthly-revenue/sync",
-            context={
-                "request_id": result.request_id,
-                "target_month": result.target_month,
-                "errors": result.errors,
-            },
-        )
-
-    return MonthlySyncResponse(
+    response = MonthlySyncResponse(
         ok=not result.errors,
         request_id=result.request_id,
         message=result.message,
@@ -329,3 +305,14 @@ def manual_monthly_sync(
             "errors": result.errors,
         },
     )
+    if not response.ok or result.errors:
+        log_api_error(
+            source="monthly_revenue",
+            message=result.message or "月度汇总失败",
+            request_snapshot=build_request_snapshot(request),
+            response_status=200,
+            response_body=response.model_dump(),
+            request_id=result.request_id,
+            context={"target_month": result.target_month},
+        )
+    return response

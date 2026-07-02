@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import Settings
-from app.failure_log import log_single_push_trace
+from app.failure_log import log_api_error, log_single_push_trace
 from app.feishu.client import FeishuClient
 from app.fields import (
     COL_APPLY_DATE,
@@ -203,7 +203,34 @@ def run_single_push(
     logger.info("开始单行推送 request_id=%s record_id=%s", request_id, record_id)
     tracer.record("start", True, table_id=table_id, build="single-push-v1")
 
-    record = feishu.get_record(table_id, record_id)
+    try:
+        record = feishu.get_record(table_id, record_id)
+    except Exception as e:
+        err = str(e)
+        tracer.record(
+            "feishu_get",
+            False,
+            error=err,
+            table_id=table_id,
+            record_id=record_id,
+        )
+        log_api_error(
+            source="feishu",
+            message=err,
+            path="/api/v1/push-jushuitan",
+            response_status=502,
+            response_body={"error": err},
+            trace_file="single-push",
+            request_id=request_id,
+            context={
+                "record_id": record_id,
+                "table_id": table_id,
+                "step": "feishu_get",
+                "steps": tracer.steps,
+            },
+        )
+        raise
+
     parent_fields = record.get("fields") or {}
     if not isinstance(parent_fields, dict):
         msg = "父表记录缺少 fields"

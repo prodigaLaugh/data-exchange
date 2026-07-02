@@ -151,7 +151,7 @@ class FeishuClient:
                 str(err),
                 code=code,
                 path=path,
-                context={"method": method},
+                context={"method": method, "params": params},
             )
             raise err
         data = body.get("data")
