@@ -29,6 +29,7 @@ from app.fields import (
     field_money,
     format_order_date,
     parse_address,
+    row_so_id,
 )
 from app.jushuitan.client import JushuitanClient
 from app.jushuitan.shop_resolver import parse_shop_id
@@ -72,7 +73,7 @@ def _index_by_order_no(records: list[dict[str, Any]]) -> dict[str, list[TableRow
         fields = rec.get("fields") or {}
         if not record_id or not isinstance(fields, dict):
             continue
-        order_no = field_text(fields.get(COL_ORDER_NO))
+        order_no = row_so_id(fields)
         if not order_no:
             continue
         row = TableRow(record_id=record_id, order_no=order_no, fields=fields)

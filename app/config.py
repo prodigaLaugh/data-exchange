@@ -15,11 +15,14 @@ class Settings(BaseSettings):
     feishu_app_secret: str = Field(..., alias="FEISHU_APP_SECRET")
     feishu_app_token: str = Field(..., alias="FEISHU_APP_TOKEN")
     feishu_table_wenchuang: str = Field(..., alias="FEISHU_TABLE_WENCHUANG")
+    # 关联子表 table_id；不填则从父表「关联文创营收」字段元数据自动解析
+    feishu_table_wenchuang_items: str = Field("", alias="FEISHU_TABLE_WENCHUANG_ITEMS")
     feishu_table_dianshang: str = Field(..., alias="FEISHU_TABLE_DIANSHANG")
 
     jst_app_key: str = Field(..., alias="JST_APP_KEY")
     jst_app_secret: str = Field(..., alias="JST_APP_SECRET")
     jst_token_file: str = Field("data/jushuitan_token.json", alias="JST_TOKEN_FILE")
+    push_state_file: str = Field("data/push_state.json", alias="PUSH_STATE_FILE")
 
     submit_api_key: str = Field(..., alias="SUBMIT_API_KEY")
     debounce_seconds: int = Field(30, alias="DEBOUNCE_SECONDS")

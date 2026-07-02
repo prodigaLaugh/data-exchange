@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import Settings, get_settings
 from app.debounce import Debouncer
@@ -17,6 +17,8 @@ from app.jushuitan.client import JushuitanClient
 from app.scheduler import shutdown_scheduler, start_scheduler
 from app.services.batch_push import BatchPushResult, run_batch_push
 from app.services.monthly_revenue import MonthlyRevenueResult, run_monthly_revenue_sync
+from app.services.single_push import SinglePushResult, run_single_push
+from app.push_state import PushStateStore
 
 logger = logging.getLogger(__name__)
 _debouncer: Debouncer | None = None
@@ -54,6 +56,14 @@ class BatchPushRequest(BaseModel):
     tableId: str = Field(..., description="飞书多维表格 table_id")
 
 
+class SinglePushRequest(BaseModel):
+    record_id: str = Field(
+        ...,
+        validation_alias=AliasChoices("recordId", "record_id"),
+        description="飞书父表 record_id",
+    )
+
+
 class BatchPushResponse(BaseModel):
     ok: bool
     request_id: str
@@ -65,6 +75,14 @@ class BatchPushResponse(BaseModel):
 class MonthlySyncResponse(BaseModel):
     ok: bool
     request_id: str
+    message: str
+    detail: dict[str, Any] | None = None
+
+
+class SinglePushResponse(BaseModel):
+    ok: bool
+    request_id: str
+    debounced: bool = False
     message: str
     detail: dict[str, Any] | None = None
 
@@ -177,6 +195,91 @@ def batch_push(
     finally:
         if _debouncer is not None:
             _debouncer.end(table_id)
+
+
+@app.post("/api/v1/push-jushuitan", response_model=SinglePushResponse)
+def push_jushuitan(
+    body: SinglePushRequest,
+    _: Annotated[None, Depends(verify_submit_key)],
+    settings: Settings = Depends(get_settings),
+) -> SinglePushResponse:
+    """
+    单行推送聚水潭：飞书按钮触发，读取父表行及「关联文创营收」子表商品后上传。
+    表格固定为 .env 中 FEISHU_TABLE_WENCHUANG。
+    """
+    record_id = body.record_id.strip()
+    if not record_id:
+        raise HTTPException(status_code=400, detail="recordId 不能为空")
+
+    feishu, jst = _clients(settings)
+    push_state = PushStateStore(settings.push_state_file)
+    request_id = str(uuid.uuid4())
+    debounce_key = f"single:{record_id}"
+
+    if _debouncer is None or not _debouncer.try_begin(debounce_key):
+        logger.info("防抖拦截（处理中） record_id=%s request_id=%s", record_id, request_id)
+        return SinglePushResponse(
+            ok=False,
+            request_id=request_id,
+            debounced=True,
+            message="该订单正在处理中，请稍后再试",
+        )
+
+    try:
+        try:
+            result: SinglePushResult = run_single_push(
+                record_id=record_id,
+                feishu=feishu,
+                jst=jst,
+                settings=settings,
+                push_state=push_state,
+                request_id=request_id,
+            )
+        except Exception as e:
+            logger.exception("单行推送异常 record_id=%s request_id=%s", record_id, request_id)
+            log_failure(
+                "api",
+                str(e),
+                path="/api/v1/push-jushuitan",
+                context={"request_id": request_id, "record_id": record_id},
+                exc=e,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={"request_id": request_id, "error": str(e)},
+            ) from e
+
+        if result.errors:
+            log_failure(
+                "single_push",
+                result.message or "单行推送失败",
+                path="/api/v1/push-jushuitan",
+                context={
+                    "request_id": result.request_id,
+                    "record_id": record_id,
+                    "so_id": result.so_id,
+                    "errors": result.errors,
+                    "steps": result.steps,
+                },
+            )
+
+        return SinglePushResponse(
+            ok=result.ok,
+            request_id=result.request_id,
+            message=result.message,
+            detail={
+                "build": "single-push-v1",
+                "record_id": result.record_id,
+                "so_id": result.so_id,
+                "skipped_jst": result.skipped_jst,
+                "jst_response": result.jst_response,
+                "errors": result.errors,
+                "steps": result.steps,
+            },
+        )
+    finally:
+        if _debouncer is not None:
+            _debouncer.end(debounce_key)
 
 
 @app.post("/api/v1/monthly-revenue/sync", response_model=MonthlySyncResponse)

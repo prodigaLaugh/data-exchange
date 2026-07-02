@@ -82,6 +82,25 @@ def log_batch_push_trace(request_id: str, entry: dict[str, Any]) -> None:
         logger.error("写入 batch-push trace 失败: %s entry=%s", e, line)
 
 
+def log_single_push_trace(request_id: str, entry: dict[str, Any]) -> None:
+    """将单行推送全过程 trace 追加写入 logs/single-push-YYYY-MM-DD.log。"""
+    record: dict[str, Any] = {
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "request_id": request_id,
+        **entry,
+    }
+    line = json.dumps(record, ensure_ascii=False, default=str)
+    try:
+        log_dir = _resolve_log_dir()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / f"single-push-{datetime.now():%Y-%m-%d}.log"
+        with _lock:
+            with log_file.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+    except OSError as e:
+        logger.error("写入 single-push trace 失败: %s entry=%s", e, line)
+
+
 def log_logistics_trace(request_id: str, entry: dict[str, Any]) -> None:
     """将物流同步全过程 trace 追加写入 logs/logistics-YYYY-MM-DD.log。"""
     record: dict[str, Any] = {

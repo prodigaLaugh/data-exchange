@@ -4,7 +4,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-# 文创营收登记（推送源表）列名
+# 文创营收登记（推送源表）列名 — 旧批量推送 schema
 COL_ORDER_NO = "订单编号"
 COL_SYNC_STATUS = "同步状态"
 COL_SYNC_TIME = "同步时间"
@@ -20,6 +20,17 @@ COL_RETAIL_PRICE = "零售价"
 COL_DISCOUNT_PRICE = "折扣价"
 COL_QTY = "数量"
 COL_PRODUCT_NAME = "商品名称"
+
+# 文创营收登记 — 单行推送 schema（父表）
+COL_APPLY_NO = "申请编号"
+COL_APPLY_DATE = "申请日期"
+COL_INVOICE_AMOUNT = "开票金额"
+COL_EXPRESS_ADDRESS = "快递地址"
+COL_LINKED_PRODUCTS = "关联文创营收"
+COL_SYNC_REASON = "同步原因"
+
+# 关联子表（品的数据）列名
+COL_SUB_ORDER_NO = "订单编号"
 
 # 电商营收登记（月度汇总目标表）列名
 COL_SALE_MONTH = "销售日期"
@@ -94,6 +105,50 @@ def format_order_date(value: Any) -> str:
         return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
     text = field_text(value)
     return text or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def row_so_id(fields: dict[str, Any]) -> str:
+    """父表订单号：优先申请编号，兼容旧字段订单编号。"""
+    return field_text(fields.get(COL_APPLY_NO)) or field_text(fields.get(COL_ORDER_NO))
+
+
+def extract_link_record_ids(value: Any) -> list[str]:
+    """从飞书关联字段解析 link_record_ids。"""
+    if value is None:
+        return []
+    if isinstance(value, dict):
+        link_ids = value.get("link_record_ids")
+        if isinstance(link_ids, list):
+            return [str(x) for x in link_ids if x]
+    if isinstance(value, list):
+        result: list[str] = []
+        for item in value:
+            if isinstance(item, str) and item:
+                result.append(item)
+            elif isinstance(item, dict):
+                rid = item.get("record_id") or item.get("id")
+                if rid:
+                    result.append(str(rid))
+        return result
+    return []
+
+
+def parse_express_address(value: Any) -> tuple[str, str, str]:
+    """
+    解析「快递地址」：地址 姓名 手机号 [备注]。
+    多个连续空格归一为单个空格后按空格拆分；备注不参与聚水潭收货字段。
+    """
+    text = re.sub(r"\s+", " ", field_text(value)).strip()
+    if not text:
+        return "", "", ""
+    parts = text.split(" ")
+    if len(parts) >= 3:
+        return parts[0], parts[1], parts[2]
+    if len(parts) == 2:
+        phone = _extract_mobile(parts[1])
+        name = parts[1].replace(phone, "").strip() if phone else parts[1]
+        return parts[0], name, phone
+    return text, "", _extract_mobile(text)
 
 
 def parse_address(value: Any) -> tuple[str, str, str]:

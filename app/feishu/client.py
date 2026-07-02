@@ -220,3 +220,75 @@ class FeishuClient:
             )
             created += len(chunk)
         return created
+
+    def get_record(self, table_id: str, record_id: str) -> dict[str, Any]:
+        data = self._request(
+            "GET",
+            f"/bitable/v1/apps/{self._app_token}/tables/{table_id}/records/{record_id}",
+        )
+        record = data.get("record")
+        if not isinstance(record, dict):
+            raise FeishuApiError("获取记录响应缺少 record", raw=data)
+        return record
+
+    def batch_get_records(
+        self,
+        table_id: str,
+        record_ids: list[str],
+        *,
+        chunk_size: int = 100,
+    ) -> list[dict[str, Any]]:
+        if not record_ids:
+            return []
+        records: list[dict[str, Any]] = []
+        for i in range(0, len(record_ids), chunk_size):
+            chunk = record_ids[i : i + chunk_size]
+            data = self._request(
+                "POST",
+                f"/bitable/v1/apps/{self._app_token}/tables/{table_id}/records/batch_get",
+                json_body={"record_ids": chunk},
+            )
+            items = data.get("records") or data.get("items") or []
+            if isinstance(items, list):
+                records.extend([r for r in items if isinstance(r, dict)])
+        return records
+
+    def list_table_fields(self, table_id: str) -> list[dict[str, Any]]:
+        fields: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {"page_size": 100}
+            if page_token:
+                params["page_token"] = page_token
+            data = self._request(
+                "GET",
+                f"/bitable/v1/apps/{self._app_token}/tables/{table_id}/fields",
+                params=params,
+            )
+            items = data.get("items") or []
+            if isinstance(items, list):
+                fields.extend([f for f in items if isinstance(f, dict)])
+            if not data.get("has_more"):
+                break
+            page_token = data.get("page_token")
+            if not page_token:
+                break
+        return fields
+
+    def resolve_linked_table_id(
+        self,
+        parent_table_id: str,
+        link_field_name: str,
+        *,
+        fallback_table_id: str = "",
+    ) -> str:
+        if fallback_table_id:
+            return fallback_table_id
+        for field in self.list_table_fields(parent_table_id):
+            if field.get("field_name") != link_field_name:
+                continue
+            prop = field.get("property") or {}
+            table_id = prop.get("table_id") or prop.get("tableId")
+            if table_id:
+                return str(table_id)
+        return ""
