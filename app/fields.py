@@ -23,7 +23,7 @@ COL_PRODUCT_NAME = "商品名称"
 
 # 文创营收登记 — 单行推送 schema（父表）
 COL_APPLY_NO = "申请编号"
-COL_APPLY_DATE = "申请日期"
+COL_APPLY_DATE = "申请时间"
 COL_INVOICE_AMOUNT = "开票金额"
 COL_EXPRESS_ADDRESS = "快递地址"
 COL_LINKED_PRODUCTS = "关联文创营收"
