@@ -38,10 +38,10 @@ def _monthly_job() -> None:
         result = run_monthly_revenue_sync(feishu=feishu, jst=jst, settings=settings)
         if result.errors:
             log_failure(
-                "monthly_revenue",
-                result.message,
-                path="scheduler/monthly_revenue_sync",
-                context={
+                request_url="scheduler://monthly_revenue_sync",
+                request_method="JOB",
+                response={
+                    "message": result.message,
                     "request_id": result.request_id,
                     "target_month": result.target_month,
                     "errors": result.errors,
@@ -50,10 +50,9 @@ def _monthly_job() -> None:
     except Exception as e:
         logger.exception("定时月度营收任务执行失败")
         log_failure(
-            "monthly_revenue",
-            str(e),
-            path="scheduler/monthly_revenue_sync",
-            exc=e,
+            request_url="scheduler://monthly_revenue_sync",
+            request_method="JOB",
+            response={"error": str(e)},
         )
 
 
@@ -64,23 +63,21 @@ def _logistics_job() -> None:
         result = run_logistics_sync(feishu=feishu, jst=jst, settings=settings)
         if result.errors:
             log_failure(
-                "logistics_sync",
-                result.message,
-                path="scheduler/logistics_sync",
-                context={
+                request_url="scheduler://logistics_sync",
+                request_method="JOB",
+                response={
+                    "message": result.message,
                     "request_id": result.request_id,
                     "table_id": result.table_id,
                     "errors": result.errors,
-                    "steps": result.steps,
                 },
             )
     except Exception as e:
         logger.exception("定时物流同步任务执行失败")
         log_failure(
-            "logistics_sync",
-            str(e),
-            path="scheduler/logistics_sync",
-            exc=e,
+            request_url="scheduler://logistics_sync",
+            request_method="JOB",
+            response={"error": str(e)},
         )
 
 

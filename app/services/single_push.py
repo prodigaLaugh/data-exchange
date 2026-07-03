@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import Settings
-from app.failure_log import log_api_error, log_single_push_trace
 from app.feishu.client import FeishuClient
 from app.fields import (
     COL_APPLY_DATE,
@@ -20,16 +19,17 @@ from app.fields import (
     COL_QTY,
     COL_RETAIL_PRICE,
     COL_SUB_ORDER_NO,
-    COL_SYNC_REASON,
     COL_SYNC_STATUS,
     COL_SYNC_TIME,
     extract_link_record_ids,
     feishu_sync_time_value,
+    resolve_sync_time_use_ms,
     field_int,
     field_money,
     field_text,
     format_order_date,
     parse_express_address,
+    row_apply_date,
     row_so_id,
 )
 from app.jushuitan.client import JushuitanClient
@@ -75,10 +75,6 @@ class _SinglePushTracer:
             step,
             ok,
             {k: v for k, v in detail.items() if k != "request_body"},
-        )
-        log_single_push_trace(
-            self.request_id,
-            {"record_id": self.record_id, "trace_step": entry},
         )
 
 
@@ -133,7 +129,7 @@ def _build_jst_order_from_parent(
     order: dict[str, Any] = {
         "shop_id": shop_id,
         "so_id": apply_no,
-        "order_date": format_order_date(parent_fields.get(COL_APPLY_DATE)),
+        "order_date": format_order_date(row_apply_date(parent_fields)),
         "shop_status": "WAIT_SELLER_SEND_GOODS",
         "shop_buyer_id": str(shop_id),
         "receiver_address": address,
@@ -153,16 +149,23 @@ def _make_feishu_status_update(
     status: str,
     sync_reason: str = "",
     settings: Settings,
+    feishu: FeishuClient,
+    table_id: str,
 ) -> dict[str, Any]:
+    use_ms = resolve_sync_time_use_ms(
+        existing_fields.get(COL_SYNC_TIME),
+        settings_use_ms=settings.sync_time_use_ms,
+        field_is_datetime=feishu.is_datetime_field(table_id, COL_SYNC_TIME),
+    )
     fields: dict[str, Any] = {
         COL_SYNC_STATUS: status,
         COL_SYNC_TIME: feishu_sync_time_value(
             existing_fields.get(COL_SYNC_TIME),
-            use_ms=settings.sync_time_use_ms,
+            use_ms=use_ms,
         ),
     }
     if sync_reason:
-        fields[COL_SYNC_REASON] = _truncate_fail_reason(sync_reason)
+        fields[settings.feishu_col_sync_reason] = _truncate_fail_reason(sync_reason)
     return {"record_id": record_id, "fields": fields}
 
 
@@ -214,21 +217,6 @@ def run_single_push(
             table_id=table_id,
             record_id=record_id,
         )
-        log_api_error(
-            source="feishu",
-            message=err,
-            path="/api/v1/push-jushuitan",
-            response_status=502,
-            response_body={"error": err},
-            trace_file="single-push",
-            request_id=request_id,
-            context={
-                "record_id": record_id,
-                "table_id": table_id,
-                "step": "feishu_get",
-                "steps": tracer.steps,
-            },
-        )
         raise
 
     parent_fields = record.get("fields") or {}
@@ -263,6 +251,7 @@ def run_single_push(
         COL_LINKED_PRODUCTS,
         fallback_table_id=settings.feishu_table_wenchuang_items.strip(),
     )
+    link_ids = extract_link_record_ids(parent_fields.get(COL_LINKED_PRODUCTS))
     try:
         item_records = _fetch_linked_items(
             feishu,
@@ -274,7 +263,7 @@ def run_single_push(
         msg = str(e)
         result.message = msg
         result.errors.append(msg)
-        tracer.record("feishu_items", False, error=msg)
+        tracer.record("feishu_items", False, error=msg, link_record_ids=link_ids)
         result.steps = tracer.steps
         return result
 
@@ -283,18 +272,29 @@ def run_single_push(
         True,
         so_id=apply_no,
         items_table_id=items_table_id,
+        link_record_ids=link_ids,
         item_count=len(item_records),
         sync_status=current_status,
+        **(
+            {"raw_linked_field": parent_fields.get(COL_LINKED_PRODUCTS)}
+            if not link_ids
+            else {}
+        ),
     )
 
     if not item_records:
-        msg = "关联文创营收无有效商品行，无法推送"
+        msg = (
+            "关联文创营收无有效商品行，无法推送"
+            f"（关联记录 {len(link_ids)} 条，子表 {items_table_id}）"
+        )
         update = _make_feishu_status_update(
             record_id,
             parent_fields,
             status=settings.sync_status_failed,
             sync_reason=msg,
             settings=settings,
+            feishu=feishu,
+            table_id=table_id,
         )
         try:
             feishu.batch_update_records(table_id, [update])
@@ -315,6 +315,8 @@ def run_single_push(
             status=settings.sync_status_failed,
             sync_reason=msg,
             settings=settings,
+            feishu=feishu,
+            table_id=table_id,
         )
         feishu.batch_update_records(table_id, [update])
         result.message = msg
@@ -332,6 +334,8 @@ def run_single_push(
             status=settings.sync_status_failed,
             sync_reason=recv_err,
             settings=settings,
+            feishu=feishu,
+            table_id=table_id,
         )
         feishu.batch_update_records(table_id, [update])
         result.message = recv_err
@@ -354,6 +358,8 @@ def run_single_push(
             status=settings.sync_status_failed,
             sync_reason=msg,
             settings=settings,
+            feishu=feishu,
+            table_id=table_id,
         )
         feishu.batch_update_records(table_id, [update])
         result.message = msg
@@ -397,6 +403,8 @@ def run_single_push(
                 status=settings.sync_status_failed,
                 sync_reason=err,
                 settings=settings,
+                feishu=feishu,
+                table_id=table_id,
             )
             try:
                 feishu.batch_update_records(table_id, [update])
@@ -418,6 +426,8 @@ def run_single_push(
                 status=settings.sync_status_failed,
                 sync_reason=msg,
                 settings=settings,
+                feishu=feishu,
+                table_id=table_id,
             )
             feishu.batch_update_records(table_id, [update])
             result.message = msg
@@ -452,6 +462,8 @@ def run_single_push(
         parent_fields,
         status=settings.sync_status_success,
         settings=settings,
+        feishu=feishu,
+        table_id=table_id,
     )
     try:
         feishu.batch_update_records(table_id, [success_update])
@@ -469,16 +481,6 @@ def run_single_push(
         )
         result.errors.append(err)
         tracer.record("feishu_update", False, update=success_update, error=err)
-        log_single_push_trace(
-            request_id,
-            {
-                "record_id": record_id,
-                "event": "feishu_writeback_failed",
-                "so_id": apply_no,
-                "error": err,
-                "steps": tracer.steps,
-            },
-        )
         result.steps = tracer.steps
         return result
 
@@ -487,17 +489,6 @@ def run_single_push(
         result.message = f"订单 {apply_no} 飞书状态已补写成功（聚水潭此前已推送）"
     else:
         result.message = f"订单 {apply_no} 推送聚水潭成功"
-    log_single_push_trace(
-        request_id,
-        {
-            "record_id": record_id,
-            "event": "completed",
-            "so_id": apply_no,
-            "message": result.message,
-            "skipped_jst": result.skipped_jst,
-            "steps": tracer.steps,
-        },
-    )
     result.steps = tracer.steps
     logger.info("单行推送结束 request_id=%s %s", request_id, result.message)
     return result

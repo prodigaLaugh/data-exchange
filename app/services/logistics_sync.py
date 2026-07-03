@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import Settings
-from app.failure_log import log_logistics_trace
 from app.feishu.client import FeishuClient
 from app.fields import COL_ORDER_NO, COL_SYNC_STATUS, COL_TRACKING_NO, field_text
 from app.jushuitan.client import JushuitanClient
@@ -48,7 +47,6 @@ class _LogisticsTracer:
             ok,
             detail,
         )
-        log_logistics_trace(self.request_id, {"table_id": self.table_id, "trace_step": entry})
 
 
 def run_logistics_sync(
@@ -107,10 +105,6 @@ def run_logistics_sync(
     if not eligible_so_ids:
         result.message = "无待查物流订单（同步成功且快递单号为空）"
         result.steps = tracer.steps
-        log_logistics_trace(
-            request_id,
-            {"table_id": table_id, "event": "completed", "message": result.message, "steps": tracer.steps},
-        )
         logger.info("物流同步结束 request_id=%s %s", request_id, result.message)
         return result
 
@@ -203,15 +197,6 @@ def run_logistics_sync(
             tracer.record("feishu_update", False, update_count=len(feishu_updates), error=err)
             result.errors.append(err)
             result.steps = tracer.steps
-            log_logistics_trace(
-                request_id,
-                {
-                    "table_id": table_id,
-                    "event": "failed",
-                    "error": err,
-                    "steps": tracer.steps,
-                },
-            )
             raise
     else:
         tracer.record("feishu_update", True, skipped=True, reason="聚水潭未返回可回写的快递单号")
@@ -220,19 +205,6 @@ def run_logistics_sync(
     result.message = (
         f"物流同步完成：待查 {result.eligible_orders} 单，"
         f"回写快递单号 {result.logistic_updated} 行"
-    )
-    log_logistics_trace(
-        request_id,
-        {
-            "table_id": table_id,
-            "event": "completed",
-            "message": result.message,
-            "eligible_orders": result.eligible_orders,
-            "logistic_updated": result.logistic_updated,
-            "errors": result.errors,
-            "tracking_results": result.tracking_results,
-            "steps": tracer.steps,
-        },
     )
     logger.info("物流同步结束 request_id=%s %s", request_id, result.message)
     return result

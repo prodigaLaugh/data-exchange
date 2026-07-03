@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     sync_status_pending: str = Field("待同步", alias="SYNC_STATUS_PENDING")
     # True=飞书「同步时间」为日期字段(写毫秒)；False=文本字段(写 YYYY-MM-DD HH:mm:ss)
     sync_time_use_ms: bool = Field(False, alias="SYNC_TIME_USE_MS")
+    # 飞书父表失败原因列名（表里没有「同步原因」时用「失败原因」）
+    feishu_col_sync_reason: str = Field("失败原因", alias="FEISHU_COL_SYNC_REASON")
 
     @model_validator(mode="after")
     def _resolve_paths(self) -> "Settings":

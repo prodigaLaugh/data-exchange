@@ -27,6 +27,10 @@ class FeishuApiError(Exception):
         self.raw = raw
 
 
+# 飞书多维表日期类字段 type：5=日期, 1001=创建时间, 1002=最后更新时间
+_DATETIME_FIELD_TYPES = frozenset({5, 1001, 1002})
+
+
 class FeishuClient:
     def __init__(self, app_id: str, app_secret: str, app_token: str) -> None:
         self._app_id = app_id
@@ -35,6 +39,9 @@ class FeishuClient:
         self._token: str | None = None
         self._token_expire_at: float = 0.0
         self._token_lock = threading.Lock()
+        self._field_type_cache: dict[tuple[str, str], int] = {}
+        self._table_fields_cached: set[str] = set()
+        self._table_fields_list: dict[str, list[dict[str, Any]]] = {}
 
     def _invalidate_token(self) -> None:
         self._token = None
@@ -53,11 +60,10 @@ class FeishuClient:
             msg = str(data.get("msg") or "")
             err = FeishuApiError(format_feishu_error(code, msg), code=code, raw=data)
             log_failure(
-                "feishu",
-                str(err),
-                code=code,
-                path=TOKEN_URL,
-                context={"stage": "tenant_access_token"},
+                request_url=TOKEN_URL,
+                request_method="POST",
+                body={"app_id": self._app_id, "app_secret": "***"},
+                response={"code": code, "msg": msg},
             )
             raise err
         token = data.get("tenant_access_token")
@@ -116,13 +122,6 @@ class FeishuClient:
                 resp.raise_for_status()
                 body = resp.json()
         except httpx.HTTPError as e:
-            log_failure(
-                "feishu",
-                f"HTTP 请求失败: {e}",
-                path=path,
-                context={"method": method, "params": params},
-                exc=e,
-            )
             raise
 
         code = body.get("code")
@@ -146,13 +145,6 @@ class FeishuClient:
                     retry_on_token_error=False,
                 )
             err = FeishuApiError(format_feishu_error(code, msg), code=code, raw=body)
-            log_failure(
-                "feishu",
-                str(err),
-                code=code,
-                path=path,
-                context={"method": method, "params": params},
-            )
             raise err
         data = body.get("data")
         return data if isinstance(data, dict) else {}
@@ -275,6 +267,23 @@ class FeishuClient:
                 break
         return fields
 
+    def _ensure_field_cache(self, table_id: str) -> None:
+        if table_id in self._table_fields_cached:
+            return
+        fields = self.list_table_fields(table_id)
+        self._table_fields_list[table_id] = fields
+        for field in fields:
+            name = field.get("field_name")
+            field_type = field.get("type")
+            if name is not None and field_type is not None:
+                self._field_type_cache[(table_id, str(name))] = int(field_type)
+        self._table_fields_cached.add(table_id)
+
+    def is_datetime_field(self, table_id: str, field_name: str) -> bool:
+        self._ensure_field_cache(table_id)
+        field_type = self._field_type_cache.get((table_id, field_name))
+        return field_type in _DATETIME_FIELD_TYPES if field_type is not None else False
+
     def resolve_linked_table_id(
         self,
         parent_table_id: str,
@@ -282,13 +291,14 @@ class FeishuClient:
         *,
         fallback_table_id: str = "",
     ) -> str:
-        if fallback_table_id:
-            return fallback_table_id
-        for field in self.list_table_fields(parent_table_id):
+        self._ensure_field_cache(parent_table_id)
+        for field in self._table_fields_list.get(parent_table_id, []):
             if field.get("field_name") != link_field_name:
                 continue
             prop = field.get("property") or {}
             table_id = prop.get("table_id") or prop.get("tableId")
             if table_id:
                 return str(table_id)
+        if fallback_table_id:
+            return fallback_table_id
         return ""

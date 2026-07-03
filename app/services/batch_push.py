@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import Settings
-from app.failure_log import log_batch_push_trace
 from app.feishu.client import FeishuClient
 from app.fields import (
     COL_ADDRESS,
@@ -25,6 +24,7 @@ from app.fields import (
     COL_TOTAL_AMOUNT,
     field_text,
     feishu_sync_time_value,
+    resolve_sync_time_use_ms,
     field_int,
     field_money,
     format_order_date,
@@ -199,10 +199,6 @@ class _PushTracer:
             ok,
             {k: v for k, v in detail.items() if k != "request_body"},
         )
-        log_batch_push_trace(
-            self.request_id,
-            {"table_id": self.table_id, "trace_step": entry},
-        )
 
 
 def _make_status_update(
@@ -212,14 +208,21 @@ def _make_status_update(
     status: str,
     fail_reason: str = "",
     settings: Settings,
+    feishu: FeishuClient,
+    table_id: str,
 ) -> list[dict[str, Any]]:
     updates: list[dict[str, Any]] = []
     for row in index.get(order_no, []):
+        use_ms = resolve_sync_time_use_ms(
+            row.fields.get(COL_SYNC_TIME),
+            settings_use_ms=settings.sync_time_use_ms,
+            field_is_datetime=feishu.is_datetime_field(table_id, COL_SYNC_TIME),
+        )
         fields: dict[str, Any] = {
             COL_SYNC_STATUS: status,
             COL_SYNC_TIME: feishu_sync_time_value(
                 row.fields.get(COL_SYNC_TIME),
-                use_ms=settings.sync_time_use_ms,
+                use_ms=use_ms,
             ),
         }
         if fail_reason:
@@ -308,6 +311,8 @@ def run_batch_push(
                         status=settings.sync_status_failed,
                         fail_reason=msg,
                         settings=settings,
+                        feishu=feishu,
+                        table_id=table_id,
                     )
                 )
                 continue
@@ -332,6 +337,8 @@ def run_batch_push(
                         status=settings.sync_status_failed,
                         fail_reason=recv_err,
                         settings=settings,
+                        feishu=feishu,
+                        table_id=table_id,
                     )
                 )
                 continue
@@ -385,6 +392,8 @@ def run_batch_push(
                         status=settings.sync_status_failed,
                         fail_reason=err,
                         settings=settings,
+                        feishu=feishu,
+                        table_id=table_id,
                     )
                 )
                 result.upload_failed += 1
@@ -408,6 +417,8 @@ def run_batch_push(
                         row.order_no,
                         status=settings.sync_status_success,
                         settings=settings,
+                        feishu=feishu,
+                        table_id=table_id,
                     )
                 )
                 result.upload_success += 1
@@ -424,6 +435,8 @@ def run_batch_push(
                         status=settings.sync_status_failed,
                         fail_reason=msg,
                         settings=settings,
+                        feishu=feishu,
+                        table_id=table_id,
                     )
                 )
                 result.upload_failed += 1
@@ -449,15 +462,6 @@ def run_batch_push(
         except Exception as e:
             err = str(e)
             tracer.record("feishu_update", False, **update_summary, error=err)
-            log_batch_push_trace(
-                request_id,
-                {
-                    "table_id": table_id,
-                    "event": "failed",
-                    "error": err,
-                    "steps": tracer.steps,
-                },
-            )
             raise
     else:
         tracer.record("feishu_update", True, skipped=True, reason="无待回写记录")
@@ -466,19 +470,6 @@ def run_batch_push(
     result.message = (
         f"推送完成：上传 {result.upload_attempted} 条（成功 {result.upload_success}，"
         f"失败 {result.upload_failed}）"
-    )
-    log_batch_push_trace(
-        request_id,
-        {
-            "table_id": table_id,
-            "event": "completed",
-            "message": result.message,
-            "upload_attempted": result.upload_attempted,
-            "upload_success": result.upload_success,
-            "upload_failed": result.upload_failed,
-            "errors": result.errors,
-            "steps": tracer.steps,
-        },
     )
     logger.info("批量推送结束 request_id=%s %s", request_id, result.message)
     return result

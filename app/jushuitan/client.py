@@ -52,20 +52,12 @@ class JushuitanClient:
                 )
                 resp.raise_for_status()
                 body = resp.json()
-        except httpx.HTTPError as e:
-            log_failure(
-                "jushuitan",
-                f"HTTP 请求失败: {e}",
-                path=path,
-                context={"stage": "auth"},
-                exc=e,
-            )
+        except httpx.HTTPError:
             raise
         if body.get("code") != 0:
             code = body.get("code")
             msg = str(body.get("msg") or "")
             err = JushuitanApiError(format_jst_error(code, msg), code=code, raw=body)
-            log_failure("jushuitan", str(err), code=code, path=path, context={"stage": "auth"})
             raise err
         data = body.get("data")
         if not isinstance(data, dict):
@@ -129,14 +121,7 @@ class JushuitanClient:
                 )
                 resp.raise_for_status()
                 body = resp.json()
-        except httpx.HTTPError as e:
-            log_failure(
-                "jushuitan",
-                f"HTTP 请求失败: {e}",
-                path=path,
-                context={"stage": "biz"},
-                exc=e,
-            )
+        except httpx.HTTPError:
             raise
 
         code = body.get("code")
@@ -197,7 +182,6 @@ class JushuitanClient:
                     rate_limit_attempt=rate_limit_attempt + 1,
                 )
             err = JushuitanApiError(format_jst_error(code, msg), code=code, raw=body)
-            log_failure("jushuitan", str(err), code=code, path=path, context={"stage": "biz"})
             raise err
         data = body.get("data")
         return data if isinstance(data, dict) else {"raw": data}

@@ -6,18 +6,19 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
 from pydantic import AliasChoices, BaseModel, Field
 
 from app.config import Settings, get_settings
 from app.debounce import Debouncer
-from app.failure_log import log_api_error, set_log_dir
+from app.failure_log import set_log_dir, verify_log_dir_writable
 from app.feishu.client import FeishuClient
 from app.jushuitan.client import JushuitanClient
 from app.request_log import (
     RequestBodyMiddleware,
-    build_request_snapshot,
+    log_request_failure,
     register_exception_handlers,
+    resolve_record_id,
 )
 from app.scheduler import shutdown_scheduler, start_scheduler
 from app.services.batch_push import BatchPushResult, run_batch_push
@@ -42,6 +43,7 @@ async def lifespan(_app: FastAPI):
     set_log_dir(settings.log_dir)
     setup_logging(settings.log_level)
     Path(settings.log_dir).mkdir(parents=True, exist_ok=True)
+    verify_log_dir_writable()
     global _debouncer
     _debouncer = Debouncer(settings.debounce_seconds)
     start_scheduler()
@@ -65,6 +67,7 @@ class BatchPushRequest(BaseModel):
 
 
 class SinglePushRequest(BaseModel):
+    """OpenAPI 文档用；实际接口也支持 query / form 传 recordId。"""
     record_id: str = Field(
         ...,
         validation_alias=AliasChoices("recordId", "record_id"),
@@ -139,12 +142,14 @@ def batch_push(
 
     if _debouncer is None or not _debouncer.try_begin(table_id):
         logger.info("防抖拦截（处理中） table_id=%s request_id=%s", table_id, request_id)
-        return BatchPushResponse(
+        debounced = BatchPushResponse(
             ok=False,
             request_id=request_id,
             debounced=True,
             message="上一请求正在处理中，请等待完成后再试",
         )
+        log_request_failure(request, debounced.model_dump(), trace_file="batch-push")
+        return debounced
 
     try:
         try:
@@ -181,17 +186,7 @@ def batch_push(
                 "steps": result.steps,
             },
         )
-        if not response.ok or result.errors:
-            log_api_error(
-                source="batch_push",
-                message=result.message or "批量推送失败",
-                request_snapshot=build_request_snapshot(request),
-                response_status=200,
-                response_body=response.model_dump(),
-                trace_file="batch-push",
-                request_id=result.request_id,
-                context={"table_id": table_id},
-            )
+        log_request_failure(request, response.model_dump(), trace_file="batch-push")
         return response
     finally:
         if _debouncer is not None:
@@ -201,17 +196,30 @@ def batch_push(
 @app.post("/api/v1/push-jushuitan", response_model=SinglePushResponse)
 def push_jushuitan(
     request: Request,
-    body: SinglePushRequest,
-    _: Annotated[None, Depends(verify_submit_key)],
+    recordId: Annotated[str | None, Query(description="飞书 record_id（query 传参）")] = None,
+    record_id_query: Annotated[
+        str | None, Query(alias="record_id", description="record_id 别名")
+    ] = None,
+    _: Annotated[None, Depends(verify_submit_key)] = None,
     settings: Settings = Depends(get_settings),
 ) -> SinglePushResponse:
     """
-    单行推送聚水潭：飞书按钮触发，读取父表行及「关联文创营收」子表商品后上传。
-    表格固定为 .env 中 FEISHU_TABLE_WENCHUANG。
+    单行推送聚水潭：飞书按钮/工作流触发。
+    recordId 可通过：JSON body、query 参数、form 表单传递。
     """
-    record_id = body.record_id.strip()
+    record_id = resolve_record_id(
+        request,
+        query_record_id=recordId,
+        query_record_id_snake=record_id_query,
+    )
     if not record_id:
-        raise HTTPException(status_code=400, detail="recordId 不能为空")
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "recordId 不能为空",
+                "hint": '请传 JSON：{"recordId":"recXXX"}，或 URL：?recordId=recXXX',
+            },
+        )
 
     feishu, jst = _clients(settings)
     push_state = PushStateStore(settings.push_state_file)
@@ -220,12 +228,14 @@ def push_jushuitan(
 
     if _debouncer is None or not _debouncer.try_begin(debounce_key):
         logger.info("防抖拦截（处理中） record_id=%s request_id=%s", record_id, request_id)
-        return SinglePushResponse(
+        debounced = SinglePushResponse(
             ok=False,
             request_id=request_id,
             debounced=True,
             message="该订单正在处理中，请稍后再试",
         )
+        log_request_failure(request, debounced.model_dump(), trace_file="single-push")
+        return debounced
 
     try:
         try:
@@ -239,9 +249,25 @@ def push_jushuitan(
             )
         except Exception as e:
             logger.exception("单行推送异常 record_id=%s request_id=%s", record_id, request_id)
+            err = str(e)
+            log_request_failure(
+                request,
+                {
+                    "ok": False,
+                    "request_id": request_id,
+                    "message": err,
+                    "detail": {
+                        "build": "single-push-v1",
+                        "record_id": record_id,
+                        "error": err,
+                        "upstream": "feishu/jushuitan",
+                    },
+                },
+                trace_file="single-push",
+            )
             raise HTTPException(
                 status_code=502,
-                detail={"request_id": request_id, "error": str(e)},
+                detail={"request_id": request_id, "error": err},
             ) from e
 
         response = SinglePushResponse(
@@ -258,17 +284,7 @@ def push_jushuitan(
                 "steps": result.steps,
             },
         )
-        if not response.ok or result.errors:
-            log_api_error(
-                source="single_push",
-                message=result.message or "单行推送失败",
-                request_snapshot=build_request_snapshot(request),
-                response_status=200,
-                response_body=response.model_dump(),
-                trace_file="single-push",
-                request_id=result.request_id,
-                context={"record_id": record_id, "so_id": result.so_id},
-            )
+        log_request_failure(request, response.model_dump(), trace_file="single-push")
         return response
     finally:
         if _debouncer is not None:
@@ -305,14 +321,5 @@ def manual_monthly_sync(
             "errors": result.errors,
         },
     )
-    if not response.ok or result.errors:
-        log_api_error(
-            source="monthly_revenue",
-            message=result.message or "月度汇总失败",
-            request_snapshot=build_request_snapshot(request),
-            response_status=200,
-            response_body=response.model_dump(),
-            request_id=result.request_id,
-            context={"target_month": result.target_month},
-        )
+    log_request_failure(request, response.model_dump())
     return response

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ast
+import json
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -23,7 +25,7 @@ COL_PRODUCT_NAME = "商品名称"
 
 # 文创营收登记 — 单行推送 schema（父表）
 COL_APPLY_NO = "申请编号"
-COL_APPLY_DATE = "申请时间"
+COL_APPLY_DATE = "申请日期"
 COL_INVOICE_AMOUNT = "开票金额"
 COL_EXPRESS_ADDRESS = "快递地址"
 COL_LINKED_PRODUCTS = "关联文创营收"
@@ -39,23 +41,48 @@ COL_SALE_QTY = "销量"
 COL_SALE_AMOUNT = "金额"
 
 
-def field_text(value: Any) -> str:
+def _parse_rich_text_literal(text: str) -> Any | None:
+    """解析被序列化成字符串的飞书富文本字段，如 \"[{'text': '...', 'type': 'text'}]\"。 """
+    s = text.strip()
+    if not s.startswith("["):
+        return None
+    try:
+        return json.loads(s)
+    except json.JSONDecodeError:
+        pass
+    try:
+        return ast.literal_eval(s)
+    except (ValueError, SyntaxError):
+        return None
+
+
+def _rich_text_segments(value: Any) -> list[str]:
+    """从飞书富文本/文本字段提取纯文本片段。"""
     if value is None:
-        return ""
-    if isinstance(value, str):
-        return value.strip()
-    if isinstance(value, (int, float)):
-        return str(value)
+        return []
     if isinstance(value, list):
-        if not value:
-            return ""
-        first = value[0]
-        if isinstance(first, dict):
-            return str(first.get("text") or first.get("name") or "").strip()
-        return str(first).strip()
+        parts: list[str] = []
+        for item in value:
+            parts.extend(_rich_text_segments(item))
+        return parts
     if isinstance(value, dict):
-        return str(value.get("text") or value.get("value") or value.get("name") or "").strip()
-    return str(value).strip()
+        text = value.get("text") or value.get("name") or value.get("value")
+        return [str(text).strip()] if text else []
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return []
+        parsed = _parse_rich_text_literal(s)
+        if parsed is not None:
+            return _rich_text_segments(parsed)
+        return [s]
+    if isinstance(value, (int, float)):
+        return [str(value)]
+    return [str(value).strip()]
+
+
+def field_text(value: Any) -> str:
+    return "".join(_rich_text_segments(value)).strip()
 
 
 def field_number(value: Any) -> float:
@@ -112,24 +139,45 @@ def row_so_id(fields: dict[str, Any]) -> str:
     return field_text(fields.get(COL_APPLY_NO)) or field_text(fields.get(COL_ORDER_NO))
 
 
+def row_apply_date(fields: dict[str, Any]) -> Any:
+    """申请日期，兼容旧列名「申请时间」。"""
+    for key in (COL_APPLY_DATE, "申请时间"):
+        if key in fields and field_text(fields.get(key)):
+            return fields.get(key)
+    return None
+
+
 def extract_link_record_ids(value: Any) -> list[str]:
-    """从飞书关联字段解析 link_record_ids。"""
+    """从飞书关联字段解析 link_record_ids。
+
+    飞书 GET record 常见格式：
+    - 字符串列表：["recXXX", "recYYY"]
+    - 对象含 record_ids：{"record_ids": ["recXXX"], "table_id": "..."}
+    - 上述对象的列表：[{"record_ids": [...], "type": "text", ...}]
+    """
     if value is None:
         return []
+
+    def _ids_from_dict(obj: dict[str, Any]) -> list[str]:
+        for key in ("link_record_ids", "record_ids", "recordIds"):
+            link_ids = obj.get(key)
+            if isinstance(link_ids, list):
+                return [str(x) for x in link_ids if x]
+        rid = obj.get("record_id") or obj.get("id")
+        return [str(rid)] if rid else []
+
     if isinstance(value, dict):
-        link_ids = value.get("link_record_ids")
-        if isinstance(link_ids, list):
-            return [str(x) for x in link_ids if x]
+        return _ids_from_dict(value)
+
     if isinstance(value, list):
         result: list[str] = []
         for item in value:
             if isinstance(item, str) and item:
                 result.append(item)
             elif isinstance(item, dict):
-                rid = item.get("record_id") or item.get("id")
-                if rid:
-                    result.append(str(rid))
+                result.extend(_ids_from_dict(item))
         return result
+
     return []
 
 
@@ -207,6 +255,25 @@ def now_sync_time_ms() -> int:
 
 def now_sync_time_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def resolve_sync_time_use_ms(
+    existing: Any,
+    *,
+    settings_use_ms: bool,
+    field_is_datetime: bool | None = None,
+) -> bool:
+    """决定写入飞书「同步时间」时用毫秒还是文本；优先按行内已有值类型对齐。"""
+    if isinstance(existing, (int, float)) and existing:
+        return True
+    text = field_text(existing)
+    if text and not text.replace(".", "", 1).isdigit():
+        return False
+    if settings_use_ms:
+        return True
+    if field_is_datetime:
+        return True
+    return False
 
 
 def feishu_sync_time_value(existing: Any, *, use_ms: bool) -> int | str:

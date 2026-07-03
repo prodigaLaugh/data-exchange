@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
-import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -41,48 +41,75 @@ def _write_json_line(log_file: Path, entry: dict[str, Any]) -> None:
             f.write(line + "\n")
 
 
-def log_api_error(
-    *,
-    source: str,
-    message: str,
-    request_snapshot: dict[str, Any] | None = None,
-    response_status: int | None = None,
-    response_body: Any = None,
-    code: Any = None,
-    path: str | None = None,
-    context: dict[str, Any] | None = None,
-    exc: BaseException | None = None,
-    trace_file: str | None = None,
-    request_id: str | None = None,
-) -> None:
-    """
-    统一 API 错误日志：包含请求地址、参数、响应。
-    写入 logs/YYYY-MM-DD.log；若指定 trace_file 则同时写入专用 trace 日志。
-    """
-    entry: dict[str, Any] = {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "event": "request_failed",
-        "source": source,
-        "message": message,
-    }
-    if request_id:
-        entry["request_id"] = request_id
-    if code is not None:
-        entry["code"] = code
-    if path:
-        entry["request_path"] = path
-    if request_snapshot:
-        entry.update(request_snapshot)
-    if response_status is not None:
-        entry["response_status"] = response_status
-    if response_body is not None:
-        entry["response_body"] = response_body
-    if context:
-        entry["context"] = context
-    if exc is not None:
-        entry["exception"] = exc.__class__.__name__
-        entry["traceback"] = traceback.format_exc()
+def _sanitize_log_body(body: Any) -> Any:
+    if not isinstance(body, dict):
+        return body
+    safe = dict(body)
+    for key in ("sign", "access_token", "app_secret", "refresh_token", "app_key"):
+        if key in safe:
+            safe[key] = "***"
+    return safe
 
+
+def build_error_log_entry(
+    *,
+    request_url: str,
+    request_method: str,
+    response: Any,
+    query: dict[str, Any] | None = None,
+    body: Any = None,
+    request_time: str | None = None,
+) -> dict[str, Any]:
+    """错误日志结构：请求时间、请求url、请求方法、请求参数、响应结果。"""
+    return {
+        "请求时间": request_time or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "请求url": request_url,
+        "请求方法": request_method,
+        "请求参数": {
+            "query": dict(query or {}),
+            "body": _sanitize_log_body(body) if body is not None else {},
+        },
+        "响应结果": response,
+    }
+
+
+def _log_dir_permission_hint(log_dir: Path, error: OSError) -> None:
+    try:
+        st = os.stat(log_dir)
+        owner_uid, owner_gid = st.st_uid, st.st_gid
+    except OSError:
+        owner_uid, owner_gid = None, None
+    logger.error(
+        "日志目录不可写 path=%s owner_uid=%s owner_gid=%s current_uid=%s error=%s；"
+        "请执行: sudo chown -R duijie:duijie %s && sudo chmod 775 %s",
+        log_dir,
+        owner_uid,
+        owner_gid,
+        os.getuid(),
+        error,
+        log_dir,
+        log_dir,
+    )
+
+
+def verify_log_dir_writable() -> None:
+    """启动时探测日志目录是否可写，不可写时输出到 journalctl。"""
+    log_dir = _resolve_log_dir()
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        probe = log_dir / ".write_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        _log_dir_permission_hint(log_dir, e)
+
+
+def log_api_error(
+    entry: dict[str, Any],
+    *,
+    trace_file: str | None = None,
+) -> None:
+    """写入 logs/YYYY-MM-DD.log；可选同时写入专用 trace 日志。"""
     try:
         daily = _resolve_log_dir() / f"{datetime.now():%Y-%m-%d}.log"
         _write_json_line(daily, entry)
@@ -90,72 +117,28 @@ def log_api_error(
             trace = _resolve_log_dir() / f"{trace_file}-{datetime.now():%Y-%m-%d}.log"
             _write_json_line(trace, entry)
     except OSError as e:
-        logger.error("写入 API 错误日志失败: %s entry=%s", e, entry)
+        log_dir = _resolve_log_dir()
+        _log_dir_permission_hint(log_dir, e)
+        logger.error("写入 API 错误日志失败（详情见上条权限提示） entry_keys=%s", list(entry))
 
 
 def log_failure(
-    source: str,
-    message: str,
     *,
-    code: Any = None,
-    path: str | None = None,
-    context: dict[str, Any] | None = None,
-    exc: BaseException | None = None,
-    request_snapshot: dict[str, Any] | None = None,
-    response_status: int | None = None,
-    response_body: Any = None,
+    request_url: str,
+    request_method: str,
+    response: Any,
+    query: dict[str, Any] | None = None,
+    body: Any = None,
+    trace_file: str | None = None,
 ) -> None:
-    """兼容旧调用；新代码请优先使用 log_api_error。"""
+    """记录上游/定时任务等错误，结构与 API 错误日志一致。"""
     log_api_error(
-        source=source,
-        message=message,
-        code=code,
-        path=path,
-        context=context,
-        exc=exc,
-        request_snapshot=request_snapshot,
-        response_status=response_status,
-        response_body=response_body,
+        build_error_log_entry(
+            request_url=request_url,
+            request_method=request_method,
+            query=query,
+            body=body,
+            response=response,
+        ),
+        trace_file=trace_file,
     )
-
-
-def log_batch_push_trace(request_id: str, entry: dict[str, Any]) -> None:
-    """将批量推送全过程 trace 追加写入 logs/batch-push-YYYY-MM-DD.log。"""
-    record: dict[str, Any] = {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "request_id": request_id,
-        **entry,
-    }
-    try:
-        log_file = _resolve_log_dir() / f"batch-push-{datetime.now():%Y-%m-%d}.log"
-        _write_json_line(log_file, record)
-    except OSError as e:
-        logger.error("写入 batch-push trace 失败: %s entry=%s", e, record)
-
-
-def log_single_push_trace(request_id: str, entry: dict[str, Any]) -> None:
-    """将单行推送全过程 trace 追加写入 logs/single-push-YYYY-MM-DD.log。"""
-    record: dict[str, Any] = {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "request_id": request_id,
-        **entry,
-    }
-    try:
-        log_file = _resolve_log_dir() / f"single-push-{datetime.now():%Y-%m-%d}.log"
-        _write_json_line(log_file, record)
-    except OSError as e:
-        logger.error("写入 single-push trace 失败: %s entry=%s", e, record)
-
-
-def log_logistics_trace(request_id: str, entry: dict[str, Any]) -> None:
-    """将物流同步全过程 trace 追加写入 logs/logistics-YYYY-MM-DD.log。"""
-    record: dict[str, Any] = {
-        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "request_id": request_id,
-        **entry,
-    }
-    try:
-        log_file = _resolve_log_dir() / f"logistics-{datetime.now():%Y-%m-%d}.log"
-        _write_json_line(log_file, record)
-    except OSError as e:
-        logger.error("写入 logistics trace 失败: %s entry=%s", e, record)
