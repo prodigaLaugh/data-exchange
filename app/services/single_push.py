@@ -117,6 +117,18 @@ def _build_jst_items(apply_no: str, item_records: list[dict[str, Any]]) -> list[
     return items
 
 
+def _build_jst_pay(*, apply_no: str, order_date: str, pay_amount: float) -> dict[str, Any]:
+    """聚水潭 WAIT_SELLER_SEND_GOODS 需带 pay 节点，且 pay.amount 须与 pay_amount 一致。"""
+    return {
+        "outer_pay_id": f"{apply_no}pay",
+        "pay_date": order_date,
+        "payment": "微信",
+        "seller_account": "seller_account",
+        "buyer_account": "buyer_account",
+        "amount": pay_amount,
+    }
+
+
 def _build_jst_order_from_parent(
     *,
     apply_no: str,
@@ -126,16 +138,19 @@ def _build_jst_order_from_parent(
 ) -> dict[str, Any]:
     address, name, phone = parse_express_address(parent_fields.get(COL_EXPRESS_ADDRESS))
     items = _build_jst_items(apply_no, item_records)
+    order_date = format_order_date(row_apply_date(parent_fields))
+    pay_amount = field_money(parent_fields.get(COL_INVOICE_AMOUNT))
     order: dict[str, Any] = {
         "shop_id": shop_id,
         "so_id": apply_no,
-        "order_date": format_order_date(row_apply_date(parent_fields)),
+        "order_date": order_date,
         "shop_status": "WAIT_SELLER_SEND_GOODS",
         "shop_buyer_id": str(shop_id),
         "receiver_address": address,
         "receiver_name": name,
         "receiver_phone": phone,
-        "pay_amount": field_money(parent_fields.get(COL_INVOICE_AMOUNT)),
+        "pay_amount": pay_amount,
+        "pay": _build_jst_pay(apply_no=apply_no, order_date=order_date, pay_amount=pay_amount),
         "freight": 0.0,
         "items": items,
     }
