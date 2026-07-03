@@ -41,6 +41,11 @@ COL_SALE_QTY = "销量"
 COL_SALE_AMOUNT = "金额"
 
 
+def _regex_extract_rich_text(text: str) -> list[str]:
+    """从无法 literal_eval 的富文本字符串里提取 text 字段值。"""
+    return re.findall(r"""['"]text['"]\s*:\s*['"]((?:\\.|[^'\\"])*)['"]""", text)
+
+
 def _parse_rich_text_literal(text: str) -> Any | None:
     """解析被序列化成字符串的飞书富文本字段，如 \"[{'text': '...', 'type': 'text'}]\"。 """
     s = text.strip()
@@ -66,8 +71,15 @@ def _rich_text_segments(value: Any) -> list[str]:
             parts.extend(_rich_text_segments(item))
         return parts
     if isinstance(value, dict):
-        text = value.get("text") or value.get("name") or value.get("value")
-        return [str(text).strip()] if text else []
+        text = value.get("text")
+        if text is None:
+            text = value.get("name") or value.get("value")
+        if text is None:
+            return []
+        if isinstance(text, (list, dict)):
+            return _rich_text_segments(text)
+        s = str(text).strip()
+        return [s] if s else []
     if isinstance(value, str):
         s = value.strip()
         if not s:
@@ -75,6 +87,9 @@ def _rich_text_segments(value: Any) -> list[str]:
         parsed = _parse_rich_text_literal(s)
         if parsed is not None:
             return _rich_text_segments(parsed)
+        regex_parts = _regex_extract_rich_text(s)
+        if regex_parts:
+            return regex_parts
         return [s]
     if isinstance(value, (int, float)):
         return [str(value)]
