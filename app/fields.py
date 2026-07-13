@@ -22,6 +22,7 @@ COL_RETAIL_PRICE = "零售价"
 COL_DISCOUNT_PRICE = "折扣价"
 COL_QTY = "数量"
 COL_PRODUCT_NAME = "商品名称"
+COL_REMARK = "备注"
 
 # 文创营收登记 — 单行推送 schema（父表）
 COL_APPLY_NO = "申请编号"

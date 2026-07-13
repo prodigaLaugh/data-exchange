@@ -17,6 +17,7 @@ from app.fields import (
     COL_LINKED_PRODUCTS,
     COL_PRODUCT_NAME,
     COL_QTY,
+    COL_REMARK,
     COL_RETAIL_PRICE,
     COL_SUB_ORDER_NO,
     COL_SYNC_STATUS,
@@ -102,18 +103,20 @@ def _build_jst_items(apply_no: str, item_records: list[dict[str, Any]]) -> list[
         base_price = field_money(f.get(COL_RETAIL_PRICE))
         shop_sku = _shop_sku_id(apply_no=apply_no, item_fields=f)
         amount = field_money(price * qty if qty else price)
-        items.append(
-            {
-                "sku_id": barcode,
-                "shop_sku_id": shop_sku,
-                "amount": amount,
-                "base_price": base_price,
-                "price": price,
-                "qty": qty,
-                "name": field_text(f.get(COL_PRODUCT_NAME)),
-                "outer_oi_id": shop_sku,
-            }
-        )
+        item: dict[str, Any] = {
+            "sku_id": barcode,
+            "shop_sku_id": shop_sku,
+            "amount": amount,
+            "base_price": base_price,
+            "price": price,
+            "qty": qty,
+            "name": field_text(f.get(COL_PRODUCT_NAME)),
+            "outer_oi_id": shop_sku,
+        }
+        remark = field_text(f.get(COL_REMARK))
+        if remark:
+            item["remark"] = remark
+        items.append(item)
     return items
 
 
@@ -154,6 +157,9 @@ def _build_jst_order_from_parent(
         "freight": 0.0,
         "items": items,
     }
+    remark = field_text(parent_fields.get(COL_REMARK))
+    if remark:
+        order["remark"] = remark
     return order
 
 
