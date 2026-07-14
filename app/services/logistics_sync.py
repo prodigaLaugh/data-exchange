@@ -108,7 +108,8 @@ def run_logistics_sync(
         logger.info("物流同步结束 request_id=%s %s", request_id, result.message)
         return result
 
-    tracking_map: dict[str, str] = {}
+    # 拆单时同一 so_id 可能对应多条物流，按顺序去重后用「、」拼接写入飞书
+    tracking_map: dict[str, list[str]] = {}
     feishu_updates: list[dict[str, Any]] = []
     batch_no = 0
 
@@ -145,7 +146,9 @@ def run_logistics_sync(
                 }
             )
             if so_id and l_id:
-                tracking_map[so_id] = l_id
+                existing = tracking_map.setdefault(so_id, [])
+                if l_id not in existing:
+                    existing.append(l_id)
 
         tracer.record(
             "jst_logistics",
@@ -156,7 +159,8 @@ def run_logistics_sync(
             tracking_found=sum(1 for r in chunk_results if r.get("has_tracking")),
         )
 
-    for order_no, tracking_no in tracking_map.items():
+    for order_no, tracking_nos in tracking_map.items():
+        tracking_no = "、".join(tracking_nos)
         updated_rows = 0
         for row in index.get(order_no, []):
             feishu_updates.append(
@@ -171,6 +175,7 @@ def run_logistics_sync(
             {
                 "so_id": order_no,
                 "tracking_no": tracking_no,
+                "tracking_count": len(tracking_nos),
                 "rows_updated": updated_rows,
                 "status": "updated",
             }
