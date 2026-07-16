@@ -35,7 +35,26 @@ COL_SYNC_REASON = "同步原因"
 # 关联子表（品的数据）列名
 COL_SUB_ORDER_NO = "订单编号"
 
-# 电商营收登记（月度汇总目标表）列名
+# 电商营收登记（订单明细同步目标表）列名
+COL_DS_SO_ID = "线上订单号"
+COL_DS_SHOP_NAME = "店铺名称"
+COL_DS_SHOP_SITE = "平台站点"
+COL_DS_ORDER_DATE = "下单时间"
+COL_DS_PAY_DATE = "付款日期"
+COL_DS_STATUS = "状态"
+COL_DS_LOGISTICS_COMPANY = "快递公司"
+COL_DS_TRACKING_NO = "快递单号"
+COL_DS_RECEIVER_NAME = "收货人"
+COL_DS_OUTER_PAY_ID = "支付单号"
+COL_DS_PAYMENT = "付款方式"
+COL_DS_ITEM_NAME = "商品名称"
+COL_DS_QTY = "数量"
+COL_DS_PRICE = "商品单价"
+COL_DS_AMOUNT = "商品金额"
+COL_DS_STANDARD_NAME = "标准品名"
+COL_DS_SKU_ID = "69码"
+
+# 已废弃：旧月度汇总列名（保留常量避免误引用）
 COL_SALE_MONTH = "销售日期"
 COL_ECOMMERCE_PLATFORM = "电商平台"
 COL_SALE_QTY = "销量"

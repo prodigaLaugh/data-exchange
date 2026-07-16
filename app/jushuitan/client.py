@@ -277,3 +277,39 @@ class JushuitanClient:
                 break
             page += 1
         return all_orders
+
+    def query_skus(
+        self,
+        sku_ids: list[str],
+        *,
+        chunk_size: int = 50,
+    ) -> dict[str, str]:
+        """批量查询 SKU，返回 sku_id -> 标准品名(name)。"""
+        if not sku_ids:
+            return {}
+        mapping: dict[str, str] = {}
+        unique = list(dict.fromkeys(s.strip() for s in sku_ids if s and str(s).strip()))
+        for i in range(0, len(unique), chunk_size):
+            chunk = unique[i : i + chunk_size]
+            biz: dict[str, Any] = {
+                "page_index": 1,
+                "page_size": len(chunk),
+                "sku_ids": ",".join(chunk),
+            }
+            data = self._biz_post("/open/sku/query", biz)
+            items = data.get("datas") or data.get("skus") or data.get("items") or []
+            if not isinstance(items, list):
+                items = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                sid = str(item.get("sku_id") or item.get("i_id") or "").strip()
+                name = str(
+                    item.get("name")
+                    or item.get("sku_name")
+                    or item.get("standard_name")
+                    or ""
+                ).strip()
+                if sid and name:
+                    mapping[sid] = name
+        return mapping

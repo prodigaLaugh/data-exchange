@@ -145,6 +145,8 @@ class RequestBodyMiddleware(BaseHTTPMiddleware):
 def _trace_file_for_path(path: str) -> str | None:
     if path == "/api/v1/push-jushuitan":
         return "single-push"
+    if path == "/api/v1/orders/sync":
+        return "order-sync"
     if path == "/api/v1/batch-push":
         return "batch-push"
     return None

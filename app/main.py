@@ -22,8 +22,11 @@ from app.request_log import (
 )
 from app.scheduler import shutdown_scheduler, start_scheduler
 from app.services.batch_push import BatchPushResult, run_batch_push
-from app.services.monthly_revenue import MonthlyRevenueResult, run_monthly_revenue_sync
+from app.services.order_sync import OrderSyncResult, run_order_sync, year_range
 from app.services.single_push import SinglePushResult, run_single_push
+from datetime import datetime
+
+from app.order_line_index import OrderLineIndexStore
 from app.push_state import PushStateStore
 
 logger = logging.getLogger(__name__)
@@ -83,11 +86,28 @@ class BatchPushResponse(BaseModel):
     detail: dict[str, Any] | None = None
 
 
-class MonthlySyncResponse(BaseModel):
+class OrderSyncResponse(BaseModel):
     ok: bool
     request_id: str
     message: str
     detail: dict[str, Any] | None = None
+
+
+class OrderSyncRequest(BaseModel):
+    """手动同步聚水潭订单明细到飞书电商表。"""
+    begin: str | None = Field(
+        None,
+        description="modified_begin，如 2026-01-01 00:00:00",
+    )
+    end: str | None = Field(
+        None,
+        description="modified_end，如 2026-12-31 23:59:59",
+    )
+    year: int | None = Field(
+        None,
+        description="同步指定年份（与 begin/end 二选一，未传则默认今年）",
+    )
+    tableId: str | None = Field(None, description="飞书 table_id，默认 FEISHU_TABLE_DIANSHANG")
 
 
 class SinglePushResponse(BaseModel):
@@ -291,35 +311,61 @@ def push_jushuitan(
             _debouncer.end(debounce_key)
 
 
-@app.post("/api/v1/monthly-revenue/sync", response_model=MonthlySyncResponse)
-def manual_monthly_sync(
+@app.post("/api/v1/orders/sync", response_model=OrderSyncResponse)
+def manual_order_sync(
     request: Request,
-    _: Annotated[None, Depends(verify_submit_key)],
+    body: OrderSyncRequest | None = None,
+    _: Annotated[None, Depends(verify_submit_key)] = None,
     settings: Settings = Depends(get_settings),
-) -> MonthlySyncResponse:
-    """手动触发月度营收汇总（定时任务为每月 6 日自动执行）。"""
+) -> OrderSyncResponse:
+    """
+    手动同步聚水潭订单明细到飞书电商表（按 so_id + 69码 upsert）。
+    - 传 year：同步该年全年
+    - 传 begin + end：同步指定修改时间范围
+    - 都不传：同步今年全年
+    """
     feishu, jst = _clients(settings)
+    index = OrderLineIndexStore(settings.order_line_index_file)
+    payload = body if body is not None else OrderSyncRequest.model_validate({})
+
+    if payload.begin and payload.end:
+        modified_begin, modified_end = payload.begin.strip(), payload.end.strip()
+    elif payload.year is not None:
+        modified_begin, modified_end = year_range(payload.year)
+    else:
+        modified_begin, modified_end = year_range(datetime.now().year)
+
+    table_id = (payload.tableId or settings.feishu_table_dianshang).strip()
+
     try:
-        result: MonthlyRevenueResult = run_monthly_revenue_sync(
+        result: OrderSyncResult = run_order_sync(
             feishu=feishu,
             jst=jst,
             settings=settings,
+            index_store=index,
+            modified_begin=modified_begin,
+            modified_end=modified_end,
+            table_id=table_id,
         )
     except Exception as e:
-        logger.exception("手动月度汇总失败")
+        logger.exception("手动订单同步失败")
         raise HTTPException(status_code=502, detail=str(e)) from e
 
-    response = MonthlySyncResponse(
+    response = OrderSyncResponse(
         ok=not result.errors,
         request_id=result.request_id,
         message=result.message,
         detail={
-            "target_month": result.target_month,
+            "table_id": result.table_id,
+            "modified_begin": result.modified_begin,
+            "modified_end": result.modified_end,
             "orders_fetched": result.orders_fetched,
-            "product_groups": result.product_groups,
-            "rows_appended": result.rows_appended,
+            "rows_built": result.rows_built,
+            "rows_created": result.rows_created,
+            "rows_updated": result.rows_updated,
             "errors": result.errors,
+            "steps": result.steps,
         },
     )
-    log_request_failure(request, response.model_dump())
+    log_request_failure(request, response.model_dump(), trace_file="order-sync")
     return response

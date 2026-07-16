@@ -9,8 +9,9 @@ from app.config import Settings, get_settings
 from app.failure_log import log_failure
 from app.feishu.client import FeishuClient
 from app.jushuitan.client import JushuitanClient
+from app.order_line_index import OrderLineIndexStore
 from app.services.logistics_sync import run_logistics_sync
-from app.services.monthly_revenue import run_monthly_revenue_sync
+from app.services.order_sync import run_weekly_order_sync
 
 logger = logging.getLogger(__name__)
 
@@ -31,26 +32,34 @@ def _build_clients(settings: Settings) -> tuple[FeishuClient, JushuitanClient]:
     return feishu, jst
 
 
-def _monthly_job() -> None:
+def _weekly_order_sync_job() -> None:
     settings = get_settings()
     feishu, jst = _build_clients(settings)
+    index = OrderLineIndexStore(settings.order_line_index_file)
     try:
-        result = run_monthly_revenue_sync(feishu=feishu, jst=jst, settings=settings)
+        result = run_weekly_order_sync(
+            feishu=feishu,
+            jst=jst,
+            settings=settings,
+            index_store=index,
+        )
         if result.errors:
             log_failure(
-                request_url="scheduler://monthly_revenue_sync",
+                request_url="scheduler://weekly_order_sync",
                 request_method="JOB",
                 response={
                     "message": result.message,
                     "request_id": result.request_id,
-                    "target_month": result.target_month,
+                    "table_id": result.table_id,
+                    "modified_begin": result.modified_begin,
+                    "modified_end": result.modified_end,
                     "errors": result.errors,
                 },
             )
     except Exception as e:
-        logger.exception("定时月度营收任务执行失败")
+        logger.exception("每周订单同步任务执行失败")
         log_failure(
-            request_url="scheduler://monthly_revenue_sync",
+            request_url="scheduler://weekly_order_sync",
             request_method="JOB",
             response={"error": str(e)},
         )
@@ -87,9 +96,9 @@ def start_scheduler() -> BackgroundScheduler:
         return _scheduler
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(
-        _monthly_job,
-        CronTrigger(day=6, hour=2, minute=0),
-        id="monthly_revenue_sync",
+        _weekly_order_sync_job,
+        CronTrigger(day_of_week="mon", hour=3, minute=0),
+        id="weekly_order_sync",
         replace_existing=True,
     )
     scheduler.add_job(
@@ -100,7 +109,7 @@ def start_scheduler() -> BackgroundScheduler:
     )
     scheduler.start()
     _scheduler = scheduler
-    logger.info("已启动定时任务：每月 6 日 02:00 电商营收汇总；每日 00:00 物流回写")
+    logger.info("已启动定时任务：每周一 03:00 电商订单明细同步；每日 00:00 物流回写")
     return scheduler
 
 

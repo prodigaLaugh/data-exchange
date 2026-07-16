@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     jst_app_secret: str = Field(..., alias="JST_APP_SECRET")
     jst_token_file: str = Field("data/jushuitan_token.json", alias="JST_TOKEN_FILE")
     push_state_file: str = Field("data/push_state.json", alias="PUSH_STATE_FILE")
+    order_line_index_file: str = Field(
+        "data/order_line_index.json", alias="ORDER_LINE_INDEX_FILE"
+    )
 
     submit_api_key: str = Field(..., alias="SUBMIT_API_KEY")
     debounce_seconds: int = Field(30, alias="DEBOUNCE_SECONDS")
@@ -52,6 +55,9 @@ class Settings(BaseSettings):
         object.__setattr__(self, "log_dir", _abs_path(self.log_dir))
         object.__setattr__(self, "jst_token_file", _abs_path(self.jst_token_file))
         object.__setattr__(self, "push_state_file", _abs_path(self.push_state_file))
+        object.__setattr__(
+            self, "order_line_index_file", _abs_path(self.order_line_index_file)
+        )
         return self
 
 
