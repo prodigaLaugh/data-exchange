@@ -304,10 +304,7 @@ def run_single_push(
     )
 
     if not item_records:
-        msg = (
-            "关联文创营收无有效商品行，无法推送"
-            f"（关联记录 {len(link_ids)} 条，子表 {items_table_id}）"
-        )
+        msg = "商品信息不能为空"
         update = _make_feishu_status_update(
             record_id,
             parent_fields,
@@ -322,6 +319,7 @@ def run_single_push(
         except Exception as e:
             result.errors.append(str(e))
         result.message = msg
+        result.errors.append(msg)
         tracer.record("validate", False, error=msg)
         result.steps = tracer.steps
         return result
@@ -371,7 +369,7 @@ def run_single_push(
         shop_id=resolved_shop_id,
     )
     if not order.get("items"):
-        msg = "子表商品行缺少有效 69码，无法推送"
+        msg = "商品信息不能为空"
         update = _make_feishu_status_update(
             record_id,
             parent_fields,
@@ -383,6 +381,7 @@ def run_single_push(
         )
         feishu.batch_update_records(table_id, [update])
         result.message = msg
+        result.errors.append(msg)
         tracer.record("validate", False, error=msg)
         result.steps = tracer.steps
         return result
