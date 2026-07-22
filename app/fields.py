@@ -218,20 +218,41 @@ def extract_link_record_ids(value: Any) -> list[str]:
 
 def parse_express_address(value: Any) -> tuple[str, str, str]:
     """
-    解析「快递地址」：地址 姓名 手机号 [备注]。
-    多个连续空格归一为单个空格后按空格拆分；备注不参与聚水潭收货字段。
+    解析「快递地址」：地址 联系人 手机号（空格分隔恰好 3 段）。
+    多个连续空格归一为单个空格；地址本身不能含空格，否则联系人/电话会错位。
     """
     text = re.sub(r"\s+", " ", field_text(value)).strip()
     if not text:
         return "", "", ""
     parts = text.split(" ")
-    if len(parts) >= 3:
+    if len(parts) == 3:
         return parts[0], parts[1], parts[2]
-    if len(parts) == 2:
-        phone = _extract_mobile(parts[1])
-        name = parts[1].replace(phone, "").strip() if phone else parts[1]
-        return parts[0], name, phone
-    return text, "", _extract_mobile(text)
+    return "", "", ""
+
+
+ADDRESS_FORMAT_ERROR = "收货地址格式不正确，正确格式为: 收货地址 联系人 手机号/电话"
+
+
+def validate_address_format(value: Any) -> str | None:
+    """
+    校验收货/快递地址必须为「地址 联系人 手机号/电话」。
+    去首尾空格、合并中间连续空格后，按空格切割必须恰好 3 段
+   （地址中间不能再有空格，否则联系人、手机号会错位）。
+    不符合时返回错误文案；符合返回 None。
+    """
+    text = re.sub(r"\s+", " ", field_text(value)).strip()
+    if not text:
+        return ADDRESS_FORMAT_ERROR
+    parts = text.split(" ")
+    if len(parts) != 3:
+        return ADDRESS_FORMAT_ERROR
+    address, name, phone = parts[0], parts[1], parts[2]
+    if not address or not name or not phone:
+        return ADDRESS_FORMAT_ERROR
+    digits = re.sub(r"\D", "", phone)
+    if len(digits) < 7:
+        return ADDRESS_FORMAT_ERROR
+    return None
 
 
 def parse_address(value: Any) -> tuple[str, str, str]:
@@ -239,7 +260,7 @@ def parse_address(value: Any) -> tuple[str, str, str]:
     解析飞书「收货地址」单元格。
     支持：
     1) 收货地址：… 收货人：… 手机号：… [备注：…]（多空格归一后按标签切分）
-    2) 旧格式：地址 姓名 电话（空格分隔）
+    2) 空格分隔恰好 3 段：地址 联系人 电话（地址中间不能含空格）
     """
     text = re.sub(r"\s+", " ", field_text(value)).strip()
     if not text:
@@ -270,13 +291,9 @@ def parse_address(value: Any) -> tuple[str, str, str]:
         return address, name, phone
 
     parts = text.split(" ")
-    if len(parts) >= 3:
+    if len(parts) == 3:
         return parts[0], parts[1], parts[2]
-    if len(parts) == 2:
-        phone = _extract_mobile(parts[1])
-        name = parts[1].replace(phone, "").strip() if phone else parts[1]
-        return parts[0], name, phone
-    return text, "", _extract_mobile(text)
+    return "", "", ""
 
 
 def _extract_mobile(text: str) -> str:

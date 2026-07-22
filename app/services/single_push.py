@@ -346,8 +346,7 @@ def run_single_push(
         result.steps = tracer.steps
         return result
 
-    address, name, phone = parse_express_address(parent_fields.get(COL_EXPRESS_ADDRESS))
-    recv_err = _validate_receiver(address, name, phone)
+    recv_err = _validate_receiver(parent_fields.get(COL_EXPRESS_ADDRESS))
     if recv_err:
         update = _make_feishu_status_update(
             record_id,

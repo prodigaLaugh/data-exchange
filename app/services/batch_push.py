@@ -30,6 +30,7 @@ from app.fields import (
     format_order_date,
     parse_address,
     row_so_id,
+    validate_address_format,
 )
 from app.jushuitan.client import JushuitanClient
 from app.jushuitan.shop_resolver import parse_shop_id
@@ -120,17 +121,9 @@ def _build_jst_order(row: TableRow, *, shop_id: int) -> dict[str, Any]:
     return order
 
 
-def _validate_receiver(address: str, name: str, phone: str) -> str | None:
-    missing: list[str] = []
-    if not address:
-        missing.append("收货地址")
-    if not name:
-        missing.append("收货人")
-    if not phone:
-        missing.append("手机号")
-    if missing:
-        return f"收货信息不完整，缺少：{'、'.join(missing)}"
-    return None
+def _validate_receiver(address_value: Any) -> str | None:
+    """校验收货地址格式：地址 联系人 手机号/电话。"""
+    return validate_address_format(address_value)
 
 
 def _sanitize_jst_order(order: dict[str, Any]) -> dict[str, Any]:
@@ -316,8 +309,7 @@ def run_batch_push(
                     )
                 )
                 continue
-            address, name, phone = parse_address(row.fields.get(COL_ADDRESS))
-            recv_err = _validate_receiver(address, name, phone)
+            recv_err = _validate_receiver(row.fields.get(COL_ADDRESS))
             if recv_err:
                 batch_skipped.append({"so_id": row.order_no, "msg": recv_err})
                 result.upload_attempted += 1
